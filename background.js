@@ -67,12 +67,13 @@ async function handleGetStatus(sendResponse) {
     : 0;
 
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  const activeTab = tabs[0];
+  const activeTab = tabs?.[0];
   const isGrokPage =
-    activeTab &&
-    (activeTab.url?.includes("grok.com") ||
-      activeTab.url?.match(/x\.com\/i\/grok/) ||
-      activeTab.url?.match(/x\.com\/grok/));
+    activeTab?.url && (
+      activeTab.url.includes("grok.com") ||
+      activeTab.url.match(/x\.com\/i\/grok/) ||
+      activeTab.url.match(/x\.com\/grok/)
+    );
 
   sendResponse({ downloadCount, isGrokPage, tabId: activeTab?.id });
 }

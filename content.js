@@ -1160,8 +1160,10 @@
 
     document.getElementById("gg-settings-btn").addEventListener("click", () => {
       state.settingsOpen = !state.settingsOpen;
-      document.getElementById("gg-settings").classList.toggle("gg-open", state.settingsOpen);
-      document.getElementById("gg-gallery").style.display = state.settingsOpen ? "none" : "";
+      const settingsEl = document.getElementById("gg-settings");
+      const galleryEl = document.getElementById("gg-gallery");
+      if (settingsEl) settingsEl.classList.toggle("gg-open", state.settingsOpen);
+      if (galleryEl) galleryEl.style.display = state.settingsOpen ? "none" : "";
     });
 
     document.getElementById("gg-cleanup-btn").addEventListener("click", async () => {
@@ -1252,8 +1254,10 @@
 
     document.getElementById("gg-back-to-gallery").addEventListener("click", () => {
       state.settingsOpen = false;
-      document.getElementById("gg-settings").classList.remove("gg-open");
-      document.getElementById("gg-gallery").style.display = "";
+      const settingsEl = document.getElementById("gg-settings");
+      const galleryEl = document.getElementById("gg-gallery");
+      if (settingsEl) settingsEl.classList.remove("gg-open");
+      if (galleryEl) galleryEl.style.display = "";
     });
   }
 
@@ -1304,7 +1308,9 @@
   function bindKeyboardEvents() {
     document.addEventListener("keydown", (e) => {
       if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable) return;
-      const lightboxOpen = document.getElementById("gg-lightbox").classList.contains("gg-open");
+      const lightboxEl = document.getElementById("gg-lightbox");
+      if (!lightboxEl) return;
+      const lightboxOpen = lightboxEl.classList.contains("gg-open");
 
       if (e.key === "Escape") {
         if (lightboxOpen) closeLightbox();
@@ -1374,7 +1380,7 @@
     if (!gallery) return;
     state._renderPage = (state._renderPage || 0) + 1;
     const items = getFilteredItems();
-    const start = (state._renderPage + 1) * RENDER_BATCH;
+    const start = state._renderPage * RENDER_BATCH;
 
     // Remove old load-more button
     document.getElementById("gg-load-more")?.remove();
@@ -1461,9 +1467,9 @@
     if (item.type === "video") return null;
     if (item.isUpscaled) return "HD";
     // If we detected dimensions from the API
-    if (item.width > 1200 || item.height > 1200) return "HD";
+    if ((item.width && item.width > 1200) || (item.height && item.height > 1200)) return "HD";
     // If we detected via naturalWidth (set after image loads)
-    if (item._naturalWidth > 1200 || item._naturalHeight > 1200) return "HD";
+    if ((item._naturalWidth && item._naturalWidth > 1200) || (item._naturalHeight && item._naturalHeight > 1200)) return "HD";
     return "720p";
   }
 
@@ -1503,12 +1509,14 @@
   function openLightbox(index) {
     state.lightboxIndex = index;
     updateLightboxContent();
-    document.getElementById("gg-lightbox").classList.add("gg-open");
+    const lightboxEl = document.getElementById("gg-lightbox");
+    if (lightboxEl) lightboxEl.classList.add("gg-open");
   }
 
   function closeLightbox() {
     state.lightboxIndex = -1;
-    document.getElementById("gg-lightbox").classList.remove("gg-open");
+    const lightboxEl = document.getElementById("gg-lightbox");
+    if (lightboxEl) lightboxEl.classList.remove("gg-open");
   }
 
   function navigateLightbox(dir) {
@@ -1524,7 +1532,9 @@
     if (!item) return;
 
     const contentArea = document.getElementById("gg-lb-content");
+    if (!contentArea) return;
     const oldMedia = contentArea.querySelector(".gg-lightbox-media");
+    if (!oldMedia) return;
 
     if (item.type === "video") {
       const video = document.createElement("video");
@@ -1542,7 +1552,8 @@
       oldMedia.replaceWith(img);
     }
 
-    document.getElementById("gg-lb-prompt").textContent = item.prompt || "No prompt detected";
+    const promptEl = document.getElementById("gg-lb-prompt");
+    if (promptEl) promptEl.textContent = item.prompt || "No prompt detected";
 
     // Update resolution label
     const resLabel = getResolutionLabel(item);
@@ -1587,9 +1598,11 @@
 
   function updateBulkBar() {
     const bar = document.getElementById("gg-bulk-bar");
+    const countEl = document.getElementById("gg-bulk-count");
+    if (!bar || !countEl) return;
     const count = state.selected.size;
     bar.classList.toggle("gg-visible", count > 0);
-    document.getElementById("gg-bulk-count").textContent = `${count} selected`;
+    countEl.textContent = `${count} selected`;
   }
 
   async function bulkDownload() {
@@ -1874,7 +1887,7 @@
   function generateFilename(item, index) {
     const ext = item.type === "video" ? "mp4" : guessExtension(item.url);
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    const promptSlug = item.prompt
+    const promptSlug = (item.prompt && item.prompt.length > 0)
       ? "_" + item.prompt.slice(0, 40).replace(/[^a-zA-Z0-9]+/g, "_").replace(/_+$/, "")
       : "";
     const idx = String(index).padStart(3, "0");
@@ -1895,8 +1908,10 @@
 
   function toggleSidecar() {
     state.sidecarOpen = !state.sidecarOpen;
-    document.querySelector(".gg-sidecar").classList.toggle("gg-open", state.sidecarOpen);
-    document.querySelector(".gg-fab").classList.toggle("gg-open", state.sidecarOpen);
+    const sidecarEl = document.querySelector(".gg-sidecar");
+    const fabEl = document.querySelector(".gg-fab");
+    if (sidecarEl) sidecarEl.classList.toggle("gg-open", state.sidecarOpen);
+    if (fabEl) fabEl.classList.toggle("gg-open", state.sidecarOpen);
 
     if (state.sidecarOpen && !state.apiLoaded) {
       // Auto-fetch from API on first open

@@ -1,27 +1,34 @@
 /* Grok Gallery Manager — Popup */
 
 document.addEventListener("DOMContentLoaded", async () => {
+  const onGrokEl = document.getElementById("on-grok");
+  const notGrokEl = document.getElementById("not-grok");
+  const dlCountEl = document.getElementById("dl-count");
+  const toggleBtn = document.getElementById("toggle-btn");
+
   try {
     const response = await chrome.runtime.sendMessage({ type: "GET_STATUS" });
 
     if (response.isGrokPage) {
-      document.getElementById("on-grok").style.display = "block";
-      document.getElementById("not-grok").style.display = "none";
-      document.getElementById("dl-count").textContent = response.downloadCount;
+      if (onGrokEl) onGrokEl.style.display = "block";
+      if (notGrokEl) notGrokEl.style.display = "none";
+      if (dlCountEl) dlCountEl.textContent = response.downloadCount;
 
-      document.getElementById("toggle-btn").addEventListener("click", () => {
-        chrome.runtime.sendMessage({
-          type: "TOGGLE_SIDECAR",
-          tabId: response.tabId,
+      if (toggleBtn) {
+        toggleBtn.addEventListener("click", () => {
+          chrome.runtime.sendMessage({
+            type: "TOGGLE_SIDECAR",
+            tabId: response.tabId,
+          });
+          window.close();
         });
-        window.close();
-      });
+      }
     } else {
-      document.getElementById("on-grok").style.display = "none";
-      document.getElementById("not-grok").style.display = "block";
+      if (onGrokEl) onGrokEl.style.display = "none";
+      if (notGrokEl) notGrokEl.style.display = "block";
     }
   } catch (err) {
-    document.getElementById("on-grok").style.display = "none";
-    document.getElementById("not-grok").style.display = "block";
+    if (onGrokEl) onGrokEl.style.display = "none";
+    if (notGrokEl) notGrokEl.style.display = "block";
   }
 });
