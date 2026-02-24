@@ -2,6 +2,17 @@
 
 A Chrome extension that provides a file-manager-style gallery for AI-generated images and videos from Grok Imagine.
 
+## Why I Built This
+
+The Grok Imagine UI seems to be deliberately terrible. I got frustrated trying to delete stuff, especially when doing lots of iterations of a media item. The default interface makes it painful to:
+
+- Find and view your generated media in a sensible grid layout
+- Bulk delete multiple items at once
+- Track what's been downloaded vs what's still only on Grok's servers
+- Upscale images to HD when the default UI hides this feature
+
+So I built this extension to give myself (and now you) a proper gallery experience.
+
 ## Features
 
 - **Gallery View**: Browse all your generated images and videos in a grid layout
