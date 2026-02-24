@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 280px;
+      padding: 16px;
+      background: #0c0c12;
+      color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 13px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 14px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid #2a2a3a;
+    }
+    .header h1 {
+      font-size: 15px;
+      font-weight: 600;
+      color: #fff;
+    }
+    .logo {
+      width: 24px; height: 24px;
+      background: linear-gradient(135deg, #00d4ff, #7b2ff7);
+      border-radius: 6px;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: bold; font-size: 12px; color: #fff;
+    }
+    .status-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 0;
+    }
+    .status-label { color: #888; }
+    .status-value { color: #00d4ff; font-weight: 600; }
+    .not-on-grok {
+      text-align: center;
+      padding: 20px 10px;
+      color: #666;
+      line-height: 1.5;
+    }
+    .not-on-grok a {
+      color: #00d4ff;
+      text-decoration: none;
+    }
+    .btn {
+      display: block;
+      width: 100%;
+      padding: 10px;
+      margin-top: 12px;
+      background: linear-gradient(135deg, #00d4ff, #7b2ff7);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    .btn:hover { opacity: 0.9; }
+    .btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="logo">G</div>
+    <h1>Grok Gallery</h1>
+  </div>
+  <div id="content">
+    <div class="not-on-grok" id="not-grok" style="display:none;">
+      Navigate to<br>
+      <a href="https://grok.com" target="_blank">grok.com</a> or
+      <a href="https://x.com/grok" target="_blank">x.com/grok</a><br>
+      to use Grok Gallery
+    </div>
+    <div id="on-grok" style="display:none;">
+      <div class="status-row">
+        <span class="status-label">Downloads</span>
+        <span class="status-value" id="dl-count">0</span>
+      </div>
+      <button class="btn" id="toggle-btn">Toggle Gallery Panel</button>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
