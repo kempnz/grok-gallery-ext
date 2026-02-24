@@ -6,14 +6,11 @@
   "permissions": [
     "activeTab",
     "downloads",
-    "storage",
-    "webRequest"
+    "storage"
   ],
   "host_permissions": [
     "https://grok.com/*",
-    "https://x.com/grok*",
-    "https://*.twimg.com/*",
-    "https://*.xai.com/*"
+    "https://x.com/grok*"
   ],
   "background": {
     "service_worker": "background.js"

@@ -389,14 +389,47 @@
 }
 .gg-card-video-badge {
   position: absolute;
-  top: 6px;
-  left: 6px;
+  top: 4px;
+  left: 4px;
   background: rgba(0, 0, 0, 0.7);
   color: #fff;
-  font-size: 10px;
-  padding: 2px 6px;
-  border-radius: 4px;
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
   font-weight: 600;
+  z-index: 2;
+}
+
+/* Resolution badge */
+.gg-card-res-badge {
+  position: absolute;
+  bottom: 4px;
+  left: 4px;
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: 700;
+  z-index: 2;
+  letter-spacing: 0.3px;
+}
+.gg-res-720p {
+  background: rgba(0, 0, 0, 0.6);
+  color: #999;
+}
+.gg-res-hd {
+  background: rgba(123, 47, 247, 0.8);
+  color: #fff;
+}
+.gg-lb-res-badge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-weight: 700;
+  margin-left: 6px;
+  vertical-align: middle;
+  letter-spacing: 0.3px;
+  text-transform: none;
 }
 
 /* Card hover overlay */
@@ -407,16 +440,17 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 6px;
   opacity: 0;
   transition: opacity 0.15s;
+  padding: 0 4px;
 }
 .gg-card:hover .gg-card-overlay {
   opacity: 1;
 }
 .gg-card-action {
-  width: 34px;
-  height: 34px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.15);
   backdrop-filter: blur(4px);
@@ -427,22 +461,23 @@
   align-items: center;
   justify-content: center;
   transition: background 0.15s;
+  flex-shrink: 0;
 }
 .gg-card-action:hover {
   background: rgba(255, 255, 255, 0.3);
 }
 .gg-card-action svg {
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
 }
 
-/* Checkbox */
+/* Checkbox — top-right, above the overlay */
 .gg-card-check {
   position: absolute;
-  top: 6px;
-  right: 6px;
-  width: 22px;
-  height: 22px;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
   border-radius: 50%;
   border: 2px solid rgba(255, 255, 255, 0.4);
   background: rgba(0, 0, 0, 0.4);
@@ -452,7 +487,7 @@
   justify-content: center;
   opacity: 0;
   transition: opacity 0.15s;
-  z-index: 2;
+  z-index: 3;
 }
 .gg-card:hover .gg-card-check,
 .gg-card.gg-selected .gg-card-check {
@@ -466,8 +501,8 @@
   display: block;
 }
 .gg-card-check svg {
-  width: 12px;
-  height: 12px;
+  width: 10px;
+  height: 10px;
   fill: #fff;
   display: none;
 }
@@ -487,11 +522,6 @@
   font-size: 11px;
   color: #fff;
   z-index: 2;
-}
-
-/* Prompt snippet under card */
-.gg-card-prompt {
-  display: none;
 }
 
 /* ── Status Bar ────────────────────────────────────────────── */
@@ -617,6 +647,7 @@
   display: flex;
   gap: 8px;
   margin-top: 10px;
+  flex-wrap: wrap;
 }
 .gg-lb-btn {
   padding: 7px 14px;

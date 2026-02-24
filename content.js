@@ -11,6 +11,10 @@
 
   // Prevent double-injection
   if (window.__grokGalleryLoaded) return;
+
+  // Don't load on /imagine public feed, but allow /imagine/favorites
+  if (/^\/imagine(\/|$)/i.test(location.pathname) && !/^\/imagine\/favorites/i.test(location.pathname)) return;
+
   window.__grokGalleryLoaded = true;
 
   // Preserve console methods before Grok overrides them
@@ -23,6 +27,7 @@
   function dbg(msg) {
     const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
     debugLines.push(line);
+    if (debugLines.length > 200) debugLines.splice(0, debugLines.length - 100);
     _log("[GrokGallery]", msg);
     // Update debug panel if it exists
     const el = document.getElementById("gg-debug-log");
@@ -31,7 +36,7 @@
 
   // ── State ──────────────────────────────────────────────────
   const state = {
-    items: [],            // [{id, url, thumbUrl, type, prompt, downloaded, element, apiId}]
+    items: [],            // [{id, url, thumbUrl, type, prompt, downloaded, element, apiId, resolution, isUpscaled}]
     selected: new Set(),
     filter: "all",        // all | images | videos | new
     gridCols: 3,
@@ -63,6 +68,8 @@
     chevRight: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>`,
     selectAll: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 12l2 2 4-4"/></svg>`,
     api: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>`,
+    upscale: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"/><line x1="21" y1="3" x2="14" y2="10"/><polyline points="9 21 3 21 3 15"/><line x1="3" y1="21" x2="10" y2="14"/></svg>`,
+    redo: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>`,
   };
 
   // ── Initialization ─────────────────────────────────────────
@@ -110,9 +117,14 @@
    * Fetch all media from Grok APIs. This is the primary data source.
    * Falls back to DOM scanning if the API calls fail.
    */
+  let _fetchPromise = null;
   async function fetchAllMedia() {
-    if (state.scanning) return;
+    if (state.scanning) return _fetchPromise;
     state.scanning = true;
+    _fetchPromise = _doFetchAllMedia();
+    return _fetchPromise;
+  }
+  async function _doFetchAllMedia() {
     updateScanButton();
     flashMessage("Fetching from Grok API...");
     dbg("Starting API fetch...");
@@ -168,6 +180,7 @@
    */
   async function fetchMediaPosts(source) {
     const label = source === "MEDIA_POST_SOURCE_LIKED" ? "Favorites" : "UserPosts";
+    resetPostLogCount();
     const allItems = [];
     let cursor = null;
     let page = 0;
@@ -233,75 +246,6 @@
     return allItems;
   }
 
-  /**
-   * Fetch user assets (generated images).
-   * GET /rest/assets
-   */
-  async function fetchAssets() {
-    const allItems = [];
-    let cursor = null;
-    let page = 0;
-    const MAX_PAGES = 50;
-
-    while (page < MAX_PAGES) {
-      const params = new URLSearchParams();
-      params.set("pageSize", "100");
-      params.append("mimeTypes", "image/jpeg");
-      params.append("mimeTypes", "image/jpg");
-      params.append("mimeTypes", "image/png");
-      params.append("mimeTypes", "image/webp");
-      params.append("mimeTypes", "video/mp4");
-      params.set("orderBy", "ORDER_BY_LAST_USE_TIME");
-      if (cursor) params.set("pageToken", cursor);
-
-      dbg(`Assets page ${page}, cursor: ${cursor || "none"}`);
-
-      const res = await fetch(`/rest/assets?${params.toString()}`, {
-        credentials: "same-origin",
-      });
-
-      if (!res.ok) {
-        dbg(`Assets API HTTP ${res.status}`);
-        throw new Error(`Assets API returned ${res.status}`);
-      }
-
-      const data = await res.json();
-
-      if (page === 0) {
-        const keys = Object.keys(data);
-        dbg(`Assets response keys: ${keys.join(", ")}`);
-        for (const key of keys) {
-          const val = data[key];
-          if (Array.isArray(val)) {
-            dbg(`  "${key}": Array[${val.length}]${val.length > 0 ? " first item keys: " + Object.keys(val[0]).join(", ") : ""}`);
-          } else if (typeof val === "object" && val !== null) {
-            dbg(`  "${key}": Object { ${Object.keys(val).join(", ")} }`);
-          } else {
-            dbg(`  "${key}": ${typeof val} = ${String(val).slice(0, 100)}`);
-          }
-        }
-      }
-
-      const assets = extractAssetsFromResponse(data);
-      dbg(`Assets page ${page}: found ${assets.length} assets in response`);
-      if (assets.length === 0) break;
-
-      for (const asset of assets) {
-        const parsed = parseAsset(asset);
-        if (parsed) allItems.push(parsed);
-      }
-
-      cursor = data.nextPageToken || data.cursor || data.nextCursor || data.paginationToken || null;
-      dbg(`Assets cursor for next page: ${cursor || "NONE (last page)"}`);
-      if (!cursor) break;
-
-      page++;
-    }
-
-    dbg(`Assets fetch complete: ${allItems.length} total items`);
-    return allItems;
-  }
-
   /* ============================================================
      API RESPONSE PARSERS
 
@@ -354,20 +298,37 @@
    * We return ALL media from the post.
    */
   let _postLogCount = 0;
+  function resetPostLogCount() { _postLogCount = 0; }
   function parseMediaPost(post) {
     const results = [];
     const prompt = post.prompt || post.originalPrompt || "";
     const apiId = post.id || null;
 
-    // Log first 3 posts so we can see the actual data
+    // Log first 3 posts — capture ALL keys so we can discover resolution/upscale fields
     if (_postLogCount < 3) {
+      dbg(`Post #${_postLogCount} ALL KEYS: ${Object.keys(post).join(", ")}`);
       dbg(`Post #${_postLogCount} mediaUrl: ${post.mediaUrl || "NONE"}`);
       dbg(`Post #${_postLogCount} mediaType: ${post.mediaType || "?"} mimeType: ${post.mimeType || "?"}`);
-      dbg(`Post #${_postLogCount} images: ${Array.isArray(post.images) ? JSON.stringify(post.images).slice(0, 300) : "NONE"}`);
-      dbg(`Post #${_postLogCount} videos: ${Array.isArray(post.videos) ? JSON.stringify(post.videos).slice(0, 300) : "NONE"}`);
+      dbg(`Post #${_postLogCount} images: ${Array.isArray(post.images) ? JSON.stringify(post.images).slice(0, 500) : "NONE"}`);
+      dbg(`Post #${_postLogCount} videos: ${Array.isArray(post.videos) ? JSON.stringify(post.videos).slice(0, 500) : "NONE"}`);
       dbg(`Post #${_postLogCount} prompt: ${(prompt || "").slice(0, 80)}`);
+      // Log any resolution-related fields
+      for (const key of Object.keys(post)) {
+        if (/width|height|resolution|quality|upscale|hd|size|dimension/i.test(key)) {
+          dbg(`Post #${_postLogCount} ${key}: ${JSON.stringify(post[key]).slice(0, 200)}`);
+        }
+      }
+      if (Array.isArray(post.images) && post.images.length > 0 && typeof post.images[0] === "object") {
+        dbg(`Post #${_postLogCount} IMG[0] KEYS: ${Object.keys(post.images[0]).join(", ")}`);
+      }
       _postLogCount++;
     }
+
+    // Detect upscale from post-level flags
+    const postUpscaled = !!(post.isUpscaled || post.upscaled || post.isHd || post.hd ||
+      post.quality === "hd" || post.quality === "high");
+    const postWidth = post.width || post.imageWidth || 0;
+    const postHeight = post.height || post.imageHeight || 0;
 
     // Main mediaUrl
     if (post.mediaUrl) {
@@ -383,6 +344,9 @@
         prompt,
         downloaded: !!state.downloadedUrls[url],
         element: null,
+        isUpscaled: postUpscaled,
+        width: postWidth,
+        height: postHeight,
       });
     }
 
@@ -393,15 +357,20 @@
         if (imgUrl) {
           const url = upgradeImageUrl(imgUrl);
           if (!results.some((r) => r.url === url)) {
+            const imgUpscaled = typeof img === "object" ? !!(img.isUpscaled || img.upscaled ||
+              img.isHd || img.hd || img.quality === "hd" || img.quality === "high") : false;
             results.push({
               id: generateId(),
               apiId: img.id || apiId,
               url,
               thumbUrl: url,
               type: "image",
-              prompt: img.prompt || img.originalPrompt || prompt,
+              prompt: (typeof img === "object" ? (img.prompt || img.originalPrompt) : null) || prompt,
               downloaded: !!state.downloadedUrls[url],
               element: null,
+              isUpscaled: imgUpscaled || postUpscaled,
+              width: (typeof img === "object" ? (img.width || img.imageWidth) : 0) || 0,
+              height: (typeof img === "object" ? (img.height || img.imageHeight) : 0) || 0,
             });
           }
         }
@@ -420,9 +389,12 @@
               url: vidUrl,
               thumbUrl: vidUrl,
               type: "video",
-              prompt: vid.prompt || vid.originalPrompt || prompt,
+              prompt: (typeof vid === "object" ? (vid.prompt || vid.originalPrompt) : null) || prompt,
               downloaded: !!state.downloadedUrls[vidUrl],
               element: null,
+              isUpscaled: false,
+              width: 0,
+              height: 0,
             });
           }
         }
@@ -432,91 +404,6 @@
     // Skip childPosts — those are other users' remixes, not our content
 
     return results;
-  }
-
-  /**
-   * Extract the array of assets from the assets API response.
-   */
-  function extractAssetsFromResponse(data) {
-    const candidates = [
-      data.assets,
-      data.items,
-      data.results,
-      data.data,
-      data.images,
-      data.media,
-    ];
-
-    for (const c of candidates) {
-      if (Array.isArray(c) && c.length > 0) return c;
-    }
-
-    if (Array.isArray(data)) return data;
-
-    for (const key of Object.keys(data)) {
-      if (Array.isArray(data[key]) && data[key].length > 0) {
-        dbg(`Found assets array in field: "${key}" (${data[key].length} items)`);
-        return data[key];
-      }
-    }
-
-    return [];
-  }
-
-  /**
-   * Parse a single asset into our item format.
-   * Assets use `key` and `previewImageKey` fields instead of direct URLs.
-   * The actual media is served from /rest/assets/content/{key}
-   */
-  function parseAsset(asset) {
-    // Construct URL from key fields — these are storage keys, not direct URLs
-    const assetKey = asset.key || asset.previewImageKey;
-    const assetId = asset.assetId;
-
-    let url = null;
-    if (assetKey) {
-      // Try the content endpoint with the storage key
-      url = `/rest/assets/content/${encodeURIComponent(assetKey)}`;
-    } else if (assetId) {
-      url = `/rest/assets/${encodeURIComponent(assetId)}/content`;
-    }
-
-    // Also check for any direct URL fields as fallback
-    if (!url) {
-      url = findMediaUrl(asset);
-    }
-
-    if (!url) {
-      dbg("Could not find URL in asset. Keys: " + Object.keys(asset).join(", "));
-      return null;
-    }
-
-    // Make relative URLs absolute
-    if (url.startsWith("/")) {
-      url = `${location.origin}${url}`;
-    }
-
-    const mime = asset.mimeType || "";
-    const isVideo = /video/i.test(mime);
-
-    // Use previewImageKey for thumbnail if different from main key
-    let thumbUrl = url;
-    if (asset.previewImageKey && asset.previewImageKey !== asset.key) {
-      thumbUrl = `${location.origin}/rest/assets/content/${encodeURIComponent(asset.previewImageKey)}`;
-    }
-
-    const prompt = asset.summary || asset.name || "";
-
-    return {
-      id: generateId(),
-      apiId: assetId || null,
-      url: upgradeImageUrl(url),
-      thumbUrl,
-      type: isVideo ? "video" : "image",
-      prompt,
-      downloaded: !!state.downloadedUrls[upgradeImageUrl(url)],
-      element: null,
-    };
   }
 
   /**
@@ -569,60 +456,6 @@
     }
 
     return null;
-  }
-
-  /**
-   * Try to find a thumbnail URL (lower-res version).
-   */
-  function findThumbUrl(obj) {
-    const thumbFields = [
-      "thumbnailUrl", "thumbnail_url", "thumbUrl", "thumb_url",
-      "previewUrl", "preview_url", "smallUrl", "small_url",
-    ];
-
-    for (const field of thumbFields) {
-      if (obj[field] && typeof obj[field] === "string") return obj[field];
-    }
-
-    // Check nested objects
-    const nested = obj.thumbnail || obj.preview || obj.thumb;
-    if (nested) {
-      if (typeof nested === "string") return nested;
-      if (typeof nested === "object") return nested.url || nested.src || null;
-    }
-
-    return null;
-  }
-
-  /**
-   * Try to find the prompt text in an API object.
-   */
-  function findPromptInPost(obj) {
-    const promptFields = [
-      "prompt", "text", "title", "caption", "description",
-      "userPrompt", "user_prompt", "query", "input",
-      "message", "content",
-    ];
-
-    for (const field of promptFields) {
-      if (obj[field] && typeof obj[field] === "string" && obj[field].length > 3) {
-        return obj[field];
-      }
-    }
-
-    // Check nested objects
-    const nestedObjects = [obj.post, obj.message, obj.conversation, obj.metadata, obj.info];
-    for (const nested of nestedObjects) {
-      if (nested && typeof nested === "object") {
-        for (const field of promptFields) {
-          if (nested[field] && typeof nested[field] === "string" && nested[field].length > 3) {
-            return nested[field];
-          }
-        }
-      }
-    }
-
-    return "";
   }
 
   /* ============================================================
@@ -857,22 +690,21 @@
      TUNING POINT: Delete button detection needs live site tuning.
      ============================================================ */
 
-  async function deleteItem(item) {
+  async function deleteItem(item, { silent = false } = {}) {
     // Try API-based delete first (unlike the post)
     if (item.apiId) {
       const apiOk = await apiDeletePost(item.apiId);
       if (apiOk) {
-        removeItemFromState(item.id);
+        removeItemFromState(item.id, silent);
         return true;
       }
-      dbg(`API delete failed for ${item.apiId}, trying DOM fallback...`);
+      dbg(`API unlike failed for ${item.apiId}, trying DOM fallback...`);
     }
 
-    // For API-sourced items without a DOM element and no API delete
+    // For API-sourced items without a DOM element — we can't delete via DOM
     if (!item.element || !item.element.isConnected) {
-      // Just remove from gallery state — can't delete from Grok without DOM or API
-      removeItemFromState(item.id);
-      return true;
+      dbg(`Cannot delete item ${item.apiId || item.id}: API failed and no DOM element`);
+      return false;
     }
 
     const el = item.element;
@@ -886,7 +718,7 @@
         confirmBtn.click();
         await sleep(300);
       }
-      removeItemFromState(item.id);
+      removeItemFromState(item.id, silent);
       return true;
     }
 
@@ -903,25 +735,32 @@
           confirmBtn.click();
           await sleep(300);
         }
-        removeItemFromState(item.id);
+        removeItemFromState(item.id, silent);
         return true;
       }
     }
 
-    // Last resort: just remove from gallery
-    removeItemFromState(item.id);
-    return true;
+    dbg(`Delete failed for item ${item.apiId || item.id}: no API or DOM method worked`);
+    return false;
   }
 
   /**
    * Try to unlike/delete a post via the Grok API.
-   * Attempts multiple known endpoint patterns.
+   * Attempts multiple endpoint patterns. Logs all attempts
+   * including response bodies so we can discover the right one.
    */
   async function apiDeletePost(postId) {
     const endpoints = [
+      // Unlike / unfavorite patterns
       { url: `/rest/media/post/${postId}/like`, method: "DELETE" },
       { url: `/rest/media/post/unlike`, method: "POST", body: { postId } },
+      { url: `/rest/media/post/like`, method: "POST", body: { postId, action: "unlike" } },
+      { url: `/rest/media/post/like`, method: "DELETE", body: { postId } },
+      { url: `/rest/media/post/${postId}/unlike`, method: "POST" },
+      { url: `/rest/media/post/${postId}/favorite`, method: "DELETE" },
+      // Delete patterns
       { url: `/rest/media/post/${postId}`, method: "DELETE" },
+      { url: `/rest/media/post/delete`, method: "POST", body: { postId } },
     ];
 
     for (const ep of endpoints) {
@@ -934,13 +773,147 @@
         if (ep.body) opts.body = JSON.stringify(ep.body);
 
         const res = await fetch(ep.url, opts);
+        const body = await res.text().catch(() => "");
         if (res.ok || res.status === 204) {
-          dbg(`API delete success: ${ep.method} ${ep.url}`);
+          dbg(`API delete SUCCESS: ${ep.method} ${ep.url} → ${res.status}`);
+          if (body) dbg(`Response: ${body.slice(0, 200)}`);
           return true;
         }
-        dbg(`API delete ${ep.method} ${ep.url} → ${res.status}`);
+        // 404/410 = already gone, treat as success
+        if (res.status === 404 || res.status === 410) {
+          dbg(`API delete ${ep.method} ${ep.url} → ${res.status} (already gone)`);
+          return true;
+        }
+        dbg(`API delete ${ep.method} ${ep.url} → ${res.status} ${body.slice(0, 100)}`);
       } catch (err) {
         dbg(`API delete error: ${ep.url} — ${err.message}`);
+      }
+    }
+
+    dbg(`All delete endpoints failed for postId: ${postId}. Check debug log and try manually unliking one item in Grok to discover the right API.`);
+    return false;
+  }
+
+  /* ============================================================
+     UPSCALE & REDO — API-based image operations
+     ============================================================ */
+
+  async function upscaleItem(item) {
+    if (item.type !== "image") {
+      flashMessage("Only images can be upscaled");
+      return;
+    }
+    if (getResolutionLabel(item) === "HD") {
+      flashMessage("Already upscaled to HD");
+      return;
+    }
+    flashMessage("Requesting upscale...");
+    const ok = await apiUpscale(item);
+    if (ok) {
+      flashMessage("Upscale requested! Refresh gallery in a moment to see the HD version.");
+    } else {
+      flashMessage("Upscale failed — check debug log for details");
+    }
+  }
+
+  async function apiUpscale(item) {
+    const postId = item.apiId;
+    if (!postId) {
+      dbg("Cannot upscale: no apiId");
+      return false;
+    }
+
+    const endpoints = [
+      { url: `/rest/media/post/${postId}/upscale`, method: "POST", body: {} },
+      { url: `/rest/media/post/upscale`, method: "POST", body: { postId } },
+      { url: `/rest/media/post/${postId}/upscale`, method: "POST", body: { postId } },
+      { url: `/rest/app-chat/upscale`, method: "POST", body: { mediaPostId: postId } },
+    ];
+
+    for (const ep of endpoints) {
+      try {
+        const opts = {
+          method: ep.method,
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+        };
+        if (ep.body) opts.body = JSON.stringify(ep.body);
+
+        const res = await fetch(ep.url, opts);
+        if (res.ok || res.status === 202) {
+          dbg(`Upscale success: ${ep.method} ${ep.url} → ${res.status}`);
+          const data = await res.json().catch(() => null);
+          if (data) dbg(`Upscale response: ${JSON.stringify(data).slice(0, 300)}`);
+          item.isUpscaled = true;
+          return true;
+        }
+        dbg(`Upscale ${ep.method} ${ep.url} → ${res.status}`);
+      } catch (err) {
+        dbg(`Upscale error: ${ep.url} — ${err.message}`);
+      }
+    }
+    return false;
+  }
+
+  async function redoItem(item) {
+    if (!item.prompt) {
+      flashMessage("No prompt available for redo");
+      return;
+    }
+    flashMessage("Requesting redo...");
+    const ok = await apiRedo(item);
+    if (ok) {
+      flashMessage("Redo requested! Refresh gallery in a moment to see the new version.");
+    } else {
+      flashMessage("Redo failed — check debug log for details");
+    }
+  }
+
+  async function apiRedo(item) {
+    const prompt = item.prompt;
+    if (!prompt) return false;
+
+    const endpoints = [
+      {
+        url: "/rest/app-chat/conversations/new",
+        method: "POST",
+        body: {
+          message: prompt,
+          modelSlug: "grok-2",
+          imageGenerationCount: 4,
+        },
+      },
+      {
+        url: "/rest/media/post/regenerate",
+        method: "POST",
+        body: { postId: item.apiId, prompt },
+      },
+      {
+        url: `/rest/media/post/${item.apiId}/regenerate`,
+        method: "POST",
+        body: { prompt },
+      },
+    ];
+
+    for (const ep of endpoints) {
+      try {
+        const opts = {
+          method: ep.method,
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+        };
+        if (ep.body) opts.body = JSON.stringify(ep.body);
+
+        const res = await fetch(ep.url, opts);
+        if (res.ok || res.status === 202) {
+          dbg(`Redo success: ${ep.method} ${ep.url} → ${res.status}`);
+          const data = await res.json().catch(() => null);
+          if (data) dbg(`Redo response keys: ${data ? Object.keys(data).join(", ") : "none"}`);
+          return true;
+        }
+        dbg(`Redo ${ep.method} ${ep.url} → ${res.status}`);
+      } catch (err) {
+        dbg(`Redo error: ${ep.url} — ${err.message}`);
       }
     }
     return false;
@@ -1002,11 +975,13 @@
     return null;
   }
 
-  function removeItemFromState(id) {
+  function removeItemFromState(id, silent = false) {
     state.items = state.items.filter((i) => i.id !== id);
     state.selected.delete(id);
-    renderGallery();
-    updateStatusBar();
+    if (!silent) {
+      renderGallery();
+      updateStatusBar();
+    }
   }
 
   /* ============================================================
@@ -1080,6 +1055,7 @@
           <button class="gg-bulk-btn" id="gg-select-all">Select All</button>
           <button class="gg-bulk-btn" id="gg-deselect-all">Deselect</button>
           <button class="gg-bulk-btn" id="gg-bulk-download">${ICONS.download} DL</button>
+          <button class="gg-bulk-btn" id="gg-bulk-upscale">${ICONS.upscale} HD</button>
           <button class="gg-bulk-btn gg-danger" id="gg-bulk-delete">${ICONS.trash} Del</button>
         </div>
       </div>
@@ -1116,6 +1092,9 @@
         <button class="gg-settings-btn gg-danger" id="gg-clear-history">
           Clear Download History
         </button>
+        <button class="gg-settings-btn gg-danger" id="gg-clear-chrome-downloads" style="margin-top:8px;">
+          Clear Chrome Download History
+        </button>
         <button class="gg-settings-btn" id="gg-toggle-debug" style="margin-top:8px;">
           Show Debug Log
         </button>
@@ -1144,6 +1123,8 @@
           <div class="gg-lightbox-prompt-text" id="gg-lb-prompt">&mdash;</div>
           <div class="gg-lightbox-actions">
             <button class="gg-lb-btn" id="gg-lb-download">${ICONS.download} Download</button>
+            <button class="gg-lb-btn" id="gg-lb-upscale">${ICONS.upscale} Upscale</button>
+            <button class="gg-lb-btn" id="gg-lb-redo">${ICONS.redo} Redo</button>
             <button class="gg-lb-btn" id="gg-lb-copy">${ICONS.copy} Copy Prompt</button>
             <button class="gg-lb-btn" id="gg-lb-open">${ICONS.open} Open</button>
             <button class="gg-lb-btn gg-danger" id="gg-lb-delete">${ICONS.trash} Delete</button>
@@ -1190,6 +1171,7 @@
     document.getElementById("gg-select-all").addEventListener("click", selectAll);
     document.getElementById("gg-deselect-all").addEventListener("click", deselectAll);
     document.getElementById("gg-bulk-download").addEventListener("click", bulkDownload);
+    document.getElementById("gg-bulk-upscale").addEventListener("click", bulkUpscale);
     document.getElementById("gg-bulk-delete").addEventListener("click", bulkDelete);
 
     // Download all buttons
@@ -1216,6 +1198,15 @@
       flashMessage("Download history cleared");
     });
 
+    document.getElementById("gg-clear-chrome-downloads").addEventListener("click", async () => {
+      const response = await chrome.runtime.sendMessage({ type: "CLEAR_DOWNLOAD_HISTORY" });
+      if (response?.success) {
+        flashMessage(`Cleared ${response.count} download entries from Chrome`);
+      } else {
+        flashMessage("Failed to clear Chrome downloads");
+      }
+    });
+
     document.getElementById("gg-toggle-debug").addEventListener("click", () => {
       const log = document.getElementById("gg-debug-log");
       const visible = log.style.display !== "none";
@@ -1239,16 +1230,28 @@
       const item = getFilteredItems()[state.lightboxIndex];
       if (item) downloadItem(item);
     });
-    document.getElementById("gg-lb-copy").addEventListener("click", () => {
+    document.getElementById("gg-lb-copy").addEventListener("click", async () => {
       const item = getFilteredItems()[state.lightboxIndex];
       if (item?.prompt) {
-        navigator.clipboard.writeText(item.prompt);
-        flashMessage("Prompt copied!");
+        try {
+          await navigator.clipboard.writeText(item.prompt);
+          flashMessage("Prompt copied!");
+        } catch {
+          flashMessage("Failed to copy prompt");
+        }
       }
     });
     document.getElementById("gg-lb-open").addEventListener("click", () => {
       const item = getFilteredItems()[state.lightboxIndex];
       if (item) window.open(item.url, "_blank");
+    });
+    document.getElementById("gg-lb-upscale").addEventListener("click", async () => {
+      const item = getFilteredItems()[state.lightboxIndex];
+      if (item) await upscaleItem(item);
+    });
+    document.getElementById("gg-lb-redo").addEventListener("click", async () => {
+      const item = getFilteredItems()[state.lightboxIndex];
+      if (item) await redoItem(item);
     });
     document.getElementById("gg-lb-delete").addEventListener("click", async () => {
       const item = getFilteredItems()[state.lightboxIndex];
@@ -1385,35 +1388,75 @@
         const item = state.items.find((i) => i.id === id);
         if (item) deleteItem(item);
       });
+
+      card.querySelector(".gg-action-upscale")?.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const item = state.items.find((i) => i.id === id);
+        if (item) upscaleItem(item);
+      });
+    });
+
+    // Detect image dimensions for resolution labels
+    gallery.querySelectorAll(".gg-card:not([data-res-checked])").forEach((card) => {
+      card.setAttribute("data-res-checked", "1");
+      const id = card.dataset.id;
+      const item = state.items.find((i) => i.id === id);
+      if (item && item.type === "image" && !item.width) {
+        const img = new Image();
+        img.onload = () => {
+          item._naturalWidth = img.naturalWidth;
+          item._naturalHeight = img.naturalHeight;
+          // Update the badge if resolution changed
+          const badge = card.querySelector(".gg-card-res-badge");
+          const label = getResolutionLabel(item);
+          if (badge && label) {
+            badge.textContent = label;
+            badge.className = `gg-card-res-badge ${label === "HD" ? "gg-res-hd" : "gg-res-720p"}`;
+          }
+        };
+        img.src = item.url;
+      }
     });
 
     updateBulkBar();
     updateStatusBar();
   }
 
+  function getResolutionLabel(item) {
+    if (item.type === "video") return null;
+    if (item.isUpscaled) return "HD";
+    // If we detected dimensions from the API
+    if (item.width > 1200 || item.height > 1200) return "HD";
+    // If we detected via naturalWidth (set after image loads)
+    if (item._naturalWidth > 1200 || item._naturalHeight > 1200) return "HD";
+    return "720p";
+  }
+
   function buildCardHTML(item, index) {
     const isSelected = state.selected.has(item.id);
-    const promptSnippet = item.prompt
-      ? item.prompt.slice(0, 80) + (item.prompt.length > 80 ? "..." : "")
-      : "";
-
     const thumbContent = item.type === "video"
       ? `<div class="gg-card-thumb gg-video-thumb"><video src="${escapeAttr(item.thumbUrl)}" muted preload="metadata" style="width:100%!important;height:100%!important;position:absolute!important;top:0!important;left:0!important;object-fit:cover!important;"></video></div>`
       : `<div class="gg-card-thumb" style="background-image: url('${escapeAttr(item.thumbUrl)}')"></div>`;
+
+    const resLabel = getResolutionLabel(item);
+    const resBadge = resLabel
+      ? `<span class="gg-card-res-badge ${resLabel === "HD" ? "gg-res-hd" : "gg-res-720p"}">${resLabel}</span>`
+      : "";
 
     return `
       <div class="gg-card ${isSelected ? "gg-selected" : ""}" data-id="${item.id}" data-index="${index}">
         ${thumbContent}
         ${item.type === "video" ? '<span class="gg-card-video-badge">VIDEO</span>' : ""}
+        ${resBadge}
         <div class="gg-card-check">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
         </div>
         <div class="gg-card-overlay">
           <button class="gg-card-action gg-action-dl" title="Download">${ICONS.download}</button>
+          ${item.type === "image" ? `<button class="gg-card-action gg-action-upscale" title="Upscale to HD">${ICONS.upscale}</button>` : ""}
           <button class="gg-card-action gg-action-del" title="Delete">${ICONS.trash}</button>
         </div>
         ${state.showBadges && item.downloaded ? '<div class="gg-downloaded-badge">\u2713</div>' : ""}
-        ${promptSnippet ? `<div class="gg-card-prompt">${escapeHTML(promptSnippet)}</div>` : ""}
       </div>
     `;
   }
@@ -1465,6 +1508,26 @@
     }
 
     document.getElementById("gg-lb-prompt").textContent = item.prompt || "No prompt detected";
+
+    // Update resolution label
+    const resLabel = getResolutionLabel(item);
+    const promptLabel = document.querySelector(".gg-lightbox-prompt-label");
+    if (promptLabel) {
+      promptLabel.innerHTML = resLabel
+        ? `Prompt <span class="gg-lb-res-badge ${resLabel === "HD" ? "gg-res-hd" : "gg-res-720p"}">${resLabel}</span>`
+        : "Prompt";
+    }
+
+    // Show/hide upscale based on type and current resolution
+    const upscaleBtn = document.getElementById("gg-lb-upscale");
+    if (upscaleBtn) {
+      upscaleBtn.style.display = (item.type === "image" && resLabel !== "HD") ? "" : "none";
+    }
+    // Show/hide redo (only for images with a prompt)
+    const redoBtn = document.getElementById("gg-lb-redo");
+    if (redoBtn) {
+      redoBtn.style.display = (item.type === "image" && item.prompt) ? "" : "none";
+    }
   }
 
   /* ============================================================
@@ -1505,16 +1568,72 @@
     const selectedItems = state.items.filter((i) => state.selected.has(i.id));
     if (selectedItems.length === 0) return;
     let deleted = 0;
+    let failed = 0;
     for (const item of selectedItems) {
-      const success = await deleteItem(item);
+      let success = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        success = await deleteItem(item, { silent: true });
+        if (success) break;
+        await sleep(1000 * (attempt + 1));
+      }
       if (success) deleted++;
+      else failed++;
+      await sleep(200);
     }
     state.selected.clear();
-    flashMessage(`Deleted ${deleted} of ${selectedItems.length} items`);
+    flashMessage(failed > 0
+      ? `Deleted ${deleted}, failed ${failed}. Check debug log.`
+      : `Deleted ${deleted} items`);
+    renderGallery();
+    updateStatusBar();
+  }
+
+  async function bulkUpscale() {
+    const selectedImages = state.items.filter((i) => state.selected.has(i.id) && i.type === "image");
+    if (selectedImages.length === 0) {
+      flashMessage("No images selected");
+      return;
+    }
+    if (_operationInProgress) {
+      flashMessage("Another operation is in progress");
+      return;
+    }
+    _operationInProgress = true;
+    _downloadCancelled = false;
+
+    const progressBar = document.getElementById("gg-progress-bar");
+    const progressText = document.getElementById("gg-progress-text");
+    const progressFill = document.getElementById("gg-progress-fill");
+    if (progressBar) progressBar.style.display = "flex";
+
+    let success = 0;
+    for (let i = 0; i < selectedImages.length; i++) {
+      if (_downloadCancelled) break;
+      const pct = Math.round(((i + 1) / selectedImages.length) * 100);
+      if (progressText) progressText.textContent = `Upscaling ${i + 1}/${selectedImages.length}...`;
+      if (progressFill) progressFill.style.width = `${pct}%`;
+
+      const ok = await apiUpscale(selectedImages[i]);
+      if (ok) success++;
+
+      await sleep(500); // rate limit
+    }
+
+    _operationInProgress = false;
+    if (progressBar) progressBar.style.display = "none";
+    state.selected.clear();
+    flashMessage(_downloadCancelled
+      ? `Cancelled. Upscaled ${success} of ${selectedImages.length}`
+      : `Upscaled ${success} of ${selectedImages.length} images`);
     renderGallery();
   }
 
   async function deleteAllByFilter(filter) {
+    if (_operationInProgress) {
+      flashMessage("Another operation is in progress");
+      return;
+    }
+
     // Ensure all items are fetched from API first
     if (!state.apiLoaded) {
       flashMessage("Fetching all items from Grok first...");
@@ -1538,31 +1657,50 @@
     if (!confirm(`Delete ${label} from Grok? This cannot be undone.`)) return;
 
     _downloadCancelled = false;
+    _operationInProgress = true;
     const progressBar = document.getElementById("gg-progress-bar");
     const progressText = document.getElementById("gg-progress-text");
     const progressFill = document.getElementById("gg-progress-fill");
     if (progressBar) progressBar.style.display = "flex";
 
     let deleted = 0;
+    let failed = 0;
     const total = items.length;
+    const MAX_RETRIES = 3;
 
     for (let i = 0; i < items.length; i++) {
       if (_downloadCancelled) break;
       const pct = Math.round(((i + 1) / total) * 100);
-      if (progressText) progressText.textContent = `Deleting ${i + 1}/${total}...`;
+      if (progressText) progressText.textContent = `Deleting ${i + 1}/${total} (${deleted} done, ${failed} failed)...`;
       if (progressFill) progressFill.style.width = `${pct}%`;
 
-      const success = await deleteItem(items[i]);
-      if (success) deleted++;
+      let success = false;
+      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        success = await deleteItem(items[i], { silent: true });
+        if (success) break;
+        dbg(`Delete retry ${attempt + 1}/${MAX_RETRIES} for ${items[i].apiId}`);
+        await sleep(1000 * (attempt + 1)); // backoff: 1s, 2s, 3s
+      }
+      if (success) {
+        deleted++;
+      } else {
+        failed++;
+      }
 
-      await sleep(50);
+      // Small delay between items to avoid rate limiting
+      await sleep(200);
     }
 
+    _operationInProgress = false;
     if (progressBar) progressBar.style.display = "none";
-    flashMessage(_downloadCancelled
+    const msg = _downloadCancelled
       ? `Cancelled. Deleted ${deleted} of ${total}`
-      : `Deleted ${deleted} items`);
+      : failed > 0
+        ? `Deleted ${deleted}, failed ${failed} of ${total}. Check debug log.`
+        : `Deleted ${deleted} items`;
+    flashMessage(msg);
     renderGallery();
+    updateStatusBar();
   }
 
   /* ============================================================
@@ -1570,6 +1708,7 @@
      ============================================================ */
 
   let _downloadCancelled = false;
+  let _operationInProgress = false;
 
   /**
    * Generate a folder name for downloads.
@@ -1599,13 +1738,13 @@
         mediaType: item.type,
         prompt: item.prompt,
       });
-      if (response.success) {
+      if (response?.success) {
         item.downloaded = true;
         state.downloadedUrls[item.url] = Date.now();
         renderGallery();
         flashMessage("Downloaded!");
       } else {
-        flashMessage(`Download error: ${response.error}`);
+        flashMessage(`Download error: ${response?.error || "No response"}`);
       }
     } catch (err) {
       flashMessage(`Download failed: ${err.message}`);
@@ -1620,6 +1759,7 @@
   async function downloadItemsStaggered(items) {
     if (items.length === 0) return;
     _downloadCancelled = false;
+    _operationInProgress = true;
 
     const folder = makeBatchFolder();
     const progressBar = document.getElementById("gg-progress-bar");
@@ -1648,7 +1788,7 @@
           mediaType: item.type,
           prompt: item.prompt,
         });
-        if (response.success) {
+        if (response?.success) {
           item.downloaded = true;
           state.downloadedUrls[item.url] = Date.now();
         } else {
@@ -1661,6 +1801,8 @@
       // Yield to event loop every item to keep UI responsive
       await sleep(50);
     }
+
+    _operationInProgress = false;
 
     if (progressBar) progressBar.style.display = "none";
 
@@ -1675,6 +1817,11 @@
   }
 
   async function downloadAllByType(type) {
+    if (_operationInProgress) {
+      flashMessage("Another operation is in progress");
+      return;
+    }
+
     // Ensure all items are fetched from API first
     if (!state.apiLoaded) {
       flashMessage("Fetching all items from Grok first...");
@@ -1693,7 +1840,7 @@
       return;
     }
     flashMessage(`Starting download of ${toDownload.length} items...`);
-    downloadItemsStaggered(toDownload);
+    await downloadItemsStaggered(toDownload);
   }
 
   function generateFilename(item, index) {
@@ -1702,7 +1849,8 @@
     const promptSlug = item.prompt
       ? "_" + item.prompt.slice(0, 40).replace(/[^a-zA-Z0-9]+/g, "_").replace(/_+$/, "")
       : "";
-    return `grok_${timestamp}${promptSlug}.${ext}`;
+    const idx = String(index).padStart(3, "0");
+    return `grok_${timestamp}_${idx}${promptSlug}.${ext}`;
   }
 
   function guessExtension(url) {
@@ -1785,7 +1933,7 @@
     const el = document.getElementById("gg-flash");
     if (!el) return;
     el.textContent = msg;
-    el.className = "gg-flash";
+    el.className = "";
     void el.offsetWidth;
     el.className = "gg-flash";
   }

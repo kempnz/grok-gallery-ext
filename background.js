@@ -2,50 +2,9 @@
    Grok Gallery Manager — Background Service Worker
    ============================================================ */
 
-// ── Detected media URLs from network requests ──────────────────
-const networkMedia = new Map(); // tabId → Set<url>
-
-// ── Listen for media network requests ──────────────────────────
-chrome.webRequest.onCompleted.addListener(
-  (details) => {
-    if (details.tabId < 0) return;
-    const url = details.url;
-
-    const isMedia =
-      /\.(jpg|jpeg|png|gif|webp|mp4|m3u8)(\?|$)/i.test(url) ||
-      /pbs\.twimg\.com\/media/i.test(url) ||
-      /video\.twimg\.com/i.test(url) ||
-      /ton\.twimg\.com/i.test(url);
-
-    if (!isMedia) return;
-
-    if (!networkMedia.has(details.tabId)) {
-      networkMedia.set(details.tabId, new Set());
-    }
-    networkMedia.get(details.tabId).add(url);
-  },
-  {
-    urls: [
-      "https://*.twimg.com/*",
-      "https://*.xai.com/*",
-      "https://grok.com/*",
-    ],
-    types: ["image", "media", "xmlhttprequest", "other"],
-  }
-);
-
-// Clean up when tabs close
-chrome.tabs.onRemoved.addListener((tabId) => {
-  networkMedia.delete(tabId);
-});
-
 // ── Message handler ────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   switch (msg.type) {
-    case "GET_NETWORK_MEDIA":
-      handleGetNetworkMedia(sender, sendResponse);
-      return true;
-
     case "DOWNLOAD_SINGLE":
       handleDownloadSingle(msg, sendResponse);
       return true;
@@ -57,17 +16,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case "TOGGLE_SIDECAR":
       handleToggleSidecar(sender, msg, sendResponse);
       return true;
+
+    case "CLEAR_DOWNLOAD_HISTORY":
+      handleClearDownloadHistory(sendResponse);
+      return true;
+
+    default:
+      return false;
   }
 });
-
-// ── Get network-detected media for the requesting tab ──────────
-function handleGetNetworkMedia(sender, sendResponse) {
-  const tabId = sender.tab?.id;
-  const urls = tabId && networkMedia.has(tabId)
-    ? Array.from(networkMedia.get(tabId))
-    : [];
-  sendResponse({ urls });
-}
 
 // ── Download a single file ─────────────────────────────────────
 // msg: { url, filename, folder, mediaType, prompt }
@@ -84,8 +41,9 @@ async function handleDownloadSingle(msg, sendResponse) {
 
     if (prompt) {
       const baseName = filename.replace(/\.[^.]+$/, "");
+      const promptText = prompt.length > 4000 ? prompt.slice(0, 4000) : prompt;
       const promptDataUri =
-        "data:text/plain;charset=utf-8," + encodeURIComponent(prompt);
+        "data:text/plain;charset=utf-8," + encodeURIComponent(promptText);
       await startDownload(promptDataUri, `${folder}/${subfolder}/${baseName}_prompt.txt`);
     }
 
@@ -119,10 +77,27 @@ async function handleGetStatus(sendResponse) {
 async function handleToggleSidecar(sender, msg, sendResponse) {
   const tabId = msg.tabId;
   if (tabId) {
-    chrome.tabs.sendMessage(tabId, { type: "TOGGLE_SIDECAR" });
-    sendResponse({ success: true });
+    try {
+      await chrome.tabs.sendMessage(tabId, { type: "TOGGLE_SIDECAR" });
+      sendResponse({ success: true });
+    } catch {
+      sendResponse({ success: false, error: "Content script not ready" });
+    }
   } else {
     sendResponse({ success: false });
+  }
+}
+
+// ── Clear GrokGallery entries from Chrome download history ─────
+async function handleClearDownloadHistory(sendResponse) {
+  try {
+    const items = await chrome.downloads.search({ filenameRegex: "GrokGallery" });
+    for (const item of items) {
+      await chrome.downloads.erase({ id: item.id });
+    }
+    sendResponse({ success: true, count: items.length });
+  } catch (err) {
+    sendResponse({ success: false, error: err.message });
   }
 }
 
@@ -135,6 +110,8 @@ function startDownload(url, filename) {
         if (chrome.runtime.lastError) {
           reject(new Error(chrome.runtime.lastError.message));
         } else {
+          // Erase from download list once complete so it doesn't pollute history
+          eraseWhenComplete(downloadId);
           resolve(downloadId);
         }
       }
@@ -142,9 +119,29 @@ function startDownload(url, filename) {
   });
 }
 
+function eraseWhenComplete(downloadId) {
+  function onChanged(delta) {
+    if (delta.id !== downloadId) return;
+    if (delta.state?.current === "complete" || delta.state?.current === "interrupted") {
+      chrome.downloads.onChanged.removeListener(onChanged);
+      chrome.downloads.erase({ id: downloadId });
+    }
+  }
+  chrome.downloads.onChanged.addListener(onChanged);
+}
+
 async function markDownloaded(url) {
   const data = await chrome.storage.local.get(["downloadedUrls"]);
   const downloaded = data.downloadedUrls || {};
   downloaded[url] = Date.now();
+
+  // Prune oldest entries if exceeding 5000 to prevent storage bloat
+  const keys = Object.keys(downloaded);
+  if (keys.length > 5000) {
+    const sorted = keys.sort((a, b) => downloaded[a] - downloaded[b]);
+    const toRemove = sorted.slice(0, keys.length - 5000);
+    for (const k of toRemove) delete downloaded[k];
+  }
+
   await chrome.storage.local.set({ downloadedUrls: downloaded });
 }
