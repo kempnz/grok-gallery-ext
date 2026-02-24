@@ -21,6 +21,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       handleClearDownloadHistory(sendResponse);
       return true;
 
+    case "CLEAR_ALL_HISTORY":
+      handleClearAllHistory(sendResponse);
+      return true;
+
     default:
       return false;
   }
@@ -96,6 +100,52 @@ async function handleClearDownloadHistory(sendResponse) {
       await chrome.downloads.erase({ id: item.id });
     }
     sendResponse({ success: true, count: items.length });
+  } catch (err) {
+    sendResponse({ success: false, error: err.message });
+  }
+}
+
+// ── Clear ALL Grok Imagine history (downloads + browser history) ──
+async function handleClearAllHistory(sendResponse) {
+  try {
+    // 1. Clear Chrome download entries matching GrokGallery
+    const dlItems = await chrome.downloads.search({ filenameRegex: "GrokGallery" });
+    for (const item of dlItems) {
+      await chrome.downloads.erase({ id: item.id });
+    }
+
+    // 2. Clear browser history for grok.com/imagine URLs
+    let historyCount = 0;
+    const grokHistory = await chrome.history.search({
+      text: "grok.com/imagine",
+      startTime: 0,
+      maxResults: 10000,
+    });
+    for (const entry of grokHistory) {
+      if (entry.url && entry.url.includes("grok.com/imagine")) {
+        await chrome.history.deleteUrl({ url: entry.url });
+        historyCount++;
+      }
+    }
+
+    // 3. Also clear x.com/grok history
+    const xHistory = await chrome.history.search({
+      text: "x.com/grok",
+      startTime: 0,
+      maxResults: 10000,
+    });
+    for (const entry of xHistory) {
+      if (entry.url && (entry.url.includes("x.com/i/grok") || entry.url.includes("x.com/grok"))) {
+        await chrome.history.deleteUrl({ url: entry.url });
+        historyCount++;
+      }
+    }
+
+    sendResponse({
+      success: true,
+      downloadCount: dlItems.length,
+      historyCount,
+    });
   } catch (err) {
     sendResponse({ success: false, error: err.message });
   }

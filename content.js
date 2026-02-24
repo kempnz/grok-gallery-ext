@@ -70,6 +70,7 @@
     api: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>`,
     upscale: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"/><line x1="21" y1="3" x2="14" y2="10"/><polyline points="9 21 3 21 3 15"/><line x1="3" y1="21" x2="10" y2="14"/></svg>`,
     redo: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>`,
+    broom: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l2 7h-4l2-7z"/><path d="M10 9c-3 2-5 6-5 10a1 1 0 001 1h12a1 1 0 001-1c0-4-2-8-5-10"/><line x1="12" y1="13" x2="12" y2="17"/><line x1="9" y1="14" x2="9.5" y2="18"/><line x1="15" y1="14" x2="14.5" y2="18"/></svg>`,
   };
 
   // ── Initialization ─────────────────────────────────────────
@@ -1038,6 +1039,9 @@
           <button class="gg-icon-btn gg-scan-btn" id="gg-scan-btn" title="Fetch all media">
             ${ICONS.refresh}
           </button>
+          <button class="gg-icon-btn" id="gg-cleanup-btn" title="Clear all history">
+            ${ICONS.broom}
+          </button>
           <button class="gg-icon-btn" id="gg-settings-btn" title="Settings">
             ${ICONS.settings}
           </button>
@@ -1158,6 +1162,25 @@
       state.settingsOpen = !state.settingsOpen;
       document.getElementById("gg-settings").classList.toggle("gg-open", state.settingsOpen);
       document.getElementById("gg-gallery").style.display = state.settingsOpen ? "none" : "";
+    });
+
+    document.getElementById("gg-cleanup-btn").addEventListener("click", async () => {
+      if (!confirm("Clear all Grok Imagine history?\n\nThis will clear:\n• Extension download tracking\n• Chrome download entries\n• Browser history for grok.com/imagine URLs")) return;
+
+      // 1. Clear extension download history
+      await chrome.storage.local.set({ downloadedUrls: {} });
+      state.downloadedUrls = {};
+      state.items.forEach((i) => (i.downloaded = false));
+
+      // 2. Clear Chrome downloads + browser history for all grok imagine links
+      const response = await chrome.runtime.sendMessage({ type: "CLEAR_ALL_HISTORY" });
+
+      renderGallery();
+      if (response?.success) {
+        flashMessage(`Cleared: ${response.downloadCount} downloads, ${response.historyCount} history entries`);
+      } else {
+        flashMessage("Tracking cleared; Chrome history clear failed");
+      }
     });
 
     document.querySelectorAll(".gg-filter-btn").forEach((btn) => {
