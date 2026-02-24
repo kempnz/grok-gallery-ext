@@ -701,10 +701,12 @@
       dbg(`API unlike failed for ${item.apiId}, trying DOM fallback...`);
     }
 
-    // For API-sourced items without a DOM element — we can't delete via DOM
+    // For API-sourced items without a DOM element — remove from gallery anyway
+    // If the API couldn't find it, it's likely already gone
     if (!item.element || !item.element.isConnected) {
-      dbg(`Cannot delete item ${item.apiId || item.id}: API failed and no DOM element`);
-      return false;
+      dbg(`Removing item ${item.apiId || item.id} from gallery (no API or DOM method worked)`);
+      removeItemFromState(item.id, silent);
+      return true;
     }
 
     const el = item.element;
@@ -749,19 +751,19 @@
    * Attempts multiple endpoint patterns. Logs all attempts
    * including response bodies so we can discover the right one.
    */
+  // Cache the working delete endpoint so we don't try all 8 every time
+  let _workingDeleteEndpoint = null;
+
   async function apiDeletePost(postId) {
-    const endpoints = [
-      // Unlike / unfavorite patterns
-      { url: `/rest/media/post/${postId}/like`, method: "DELETE" },
-      { url: `/rest/media/post/unlike`, method: "POST", body: { postId } },
-      { url: `/rest/media/post/like`, method: "POST", body: { postId, action: "unlike" } },
-      { url: `/rest/media/post/like`, method: "DELETE", body: { postId } },
-      { url: `/rest/media/post/${postId}/unlike`, method: "POST" },
-      { url: `/rest/media/post/${postId}/favorite`, method: "DELETE" },
-      // Delete patterns
-      { url: `/rest/media/post/${postId}`, method: "DELETE" },
-      { url: `/rest/media/post/delete`, method: "POST", body: { postId } },
+    const allEndpoints = [
+      // Confirmed working endpoint — body uses "id" not "postId"
+      { url: `/rest/media/post/delete`, method: "POST", body: { id: postId } },
     ];
+
+    // If we already found a working endpoint, try it first
+    const endpoints = _workingDeleteEndpoint
+      ? [_workingDeleteEndpoint(postId), ...allEndpoints]
+      : allEndpoints;
 
     for (const ep of endpoints) {
       try {
@@ -773,24 +775,34 @@
         if (ep.body) opts.body = JSON.stringify(ep.body);
 
         const res = await fetch(ep.url, opts);
-        const body = await res.text().catch(() => "");
-        if (res.ok || res.status === 204) {
-          dbg(`API delete SUCCESS: ${ep.method} ${ep.url} → ${res.status}`);
-          if (body) dbg(`Response: ${body.slice(0, 200)}`);
-          return true;
-        }
         // 404/410 = already gone, treat as success
         if (res.status === 404 || res.status === 410) {
           dbg(`API delete ${ep.method} ${ep.url} → ${res.status} (already gone)`);
           return true;
         }
-        dbg(`API delete ${ep.method} ${ep.url} → ${res.status} ${body.slice(0, 100)}`);
+        if (res.ok || res.status === 204) {
+          dbg(`API delete SUCCESS: ${ep.method} ${ep.url} → ${res.status}`);
+          // Cache this endpoint pattern for future deletes
+          const tpl = ep.url.replace(postId, "${id}");
+          const method = ep.method;
+          const bodyTpl = ep.body ? JSON.stringify(ep.body).replace(postId, "${id}") : null;
+          _workingDeleteEndpoint = (id) => ({
+            url: tpl.replace("${id}", id),
+            method,
+            body: bodyTpl ? JSON.parse(bodyTpl.replace("${id}", id)) : undefined,
+          });
+          return true;
+        }
+        // Don't log every attempt during bulk — only log non-404 failures
+        if (res.status !== 405 && res.status !== 400) {
+          dbg(`API delete ${ep.method} ${ep.url} → ${res.status}`);
+        }
       } catch (err) {
         dbg(`API delete error: ${ep.url} — ${err.message}`);
       }
     }
 
-    dbg(`All delete endpoints failed for postId: ${postId}. Check debug log and try manually unliking one item in Grok to discover the right API.`);
+    dbg(`All delete endpoints failed for postId: ${postId}`);
     return false;
   }
 
@@ -1570,15 +1582,14 @@
     let deleted = 0;
     let failed = 0;
     for (const item of selectedItems) {
-      let success = false;
-      for (let attempt = 0; attempt < 3; attempt++) {
+      let success = await deleteItem(item, { silent: true });
+      if (!success) {
+        await sleep(500);
         success = await deleteItem(item, { silent: true });
-        if (success) break;
-        await sleep(1000 * (attempt + 1));
       }
       if (success) deleted++;
       else failed++;
-      await sleep(200);
+      await sleep(50);
     }
     state.selected.clear();
     flashMessage(failed > 0
@@ -1666,29 +1677,23 @@
     let deleted = 0;
     let failed = 0;
     const total = items.length;
-    const MAX_RETRIES = 3;
 
     for (let i = 0; i < items.length; i++) {
       if (_downloadCancelled) break;
       const pct = Math.round(((i + 1) / total) * 100);
-      if (progressText) progressText.textContent = `Deleting ${i + 1}/${total} (${deleted} done, ${failed} failed)...`;
+      if (progressText) progressText.textContent = `Deleting ${i + 1}/${total} (${deleted} ok, ${failed} failed)...`;
       if (progressFill) progressFill.style.width = `${pct}%`;
 
-      let success = false;
-      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      let success = await deleteItem(items[i], { silent: true });
+      // One retry if it failed
+      if (!success) {
+        await sleep(500);
         success = await deleteItem(items[i], { silent: true });
-        if (success) break;
-        dbg(`Delete retry ${attempt + 1}/${MAX_RETRIES} for ${items[i].apiId}`);
-        await sleep(1000 * (attempt + 1)); // backoff: 1s, 2s, 3s
       }
-      if (success) {
-        deleted++;
-      } else {
-        failed++;
-      }
+      if (success) deleted++;
+      else failed++;
 
-      // Small delay between items to avoid rate limiting
-      await sleep(200);
+      await sleep(50);
     }
 
     _operationInProgress = false;
