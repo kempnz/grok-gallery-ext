@@ -50,10 +50,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       handleDownloadSingle(msg, sendResponse);
       return true;
 
-    case "DOWNLOAD_BATCH":
-      handleDownloadBatch(msg, sendResponse);
-      return true;
-
     case "GET_STATUS":
       handleGetStatus(sendResponse);
       return true;
@@ -74,67 +70,28 @@ function handleGetNetworkMedia(sender, sendResponse) {
 }
 
 // ── Download a single file ─────────────────────────────────────
+// msg: { url, filename, folder, mediaType, prompt }
+// folder: base folder path e.g. "GrokGallery/2026-02-24"
+// mediaType: "image" or "video" — used to put in images/ or videos/ subfolder
 async function handleDownloadSingle(msg, sendResponse) {
   try {
-    const { url, filename, prompt } = msg;
+    const { url, filename, folder, mediaType, prompt } = msg;
 
-    // Download the media file
-    const dlId = await startDownload(url, `GrokGallery/${filename}`);
+    const subfolder = mediaType === "video" ? "videos" : "images";
+    const fullPath = `${folder}/${subfolder}/${filename}`;
 
-    // If a prompt is provided, save a sidecar _prompt.txt
+    const dlId = await startDownload(url, fullPath);
+
     if (prompt) {
       const baseName = filename.replace(/\.[^.]+$/, "");
-      const promptBlob = new Blob([prompt], { type: "text/plain" });
-      const promptUrl = URL.createObjectURL(promptBlob);
-      // We can't use blob URLs in MV3 service worker downloads easily,
-      // so we encode as data URI instead
       const promptDataUri =
         "data:text/plain;charset=utf-8," + encodeURIComponent(prompt);
-      await startDownload(promptDataUri, `GrokGallery/${baseName}_prompt.txt`);
+      await startDownload(promptDataUri, `${folder}/${subfolder}/${baseName}_prompt.txt`);
     }
 
-    // Track the download
     await markDownloaded(url);
 
     sendResponse({ success: true, downloadId: dlId });
-  } catch (err) {
-    sendResponse({ success: false, error: err.message });
-  }
-}
-
-// ── Download a batch of files ──────────────────────────────────
-async function handleDownloadBatch(msg, sendResponse) {
-  try {
-    const { items } = msg; // [{url, filename, prompt}]
-    const prompts = [];
-
-    for (const item of items) {
-      await startDownload(item.url, `GrokGallery/${item.filename}`);
-
-      if (item.prompt) {
-        const baseName = item.filename.replace(/\.[^.]+$/, "");
-        const promptDataUri =
-          "data:text/plain;charset=utf-8," +
-          encodeURIComponent(item.prompt);
-        await startDownload(
-          promptDataUri,
-          `GrokGallery/${baseName}_prompt.txt`
-        );
-        prompts.push(`## ${item.filename}\n${item.prompt}`);
-      }
-
-      await markDownloaded(item.url);
-    }
-
-    // Generate combined prompts.txt manifest
-    if (prompts.length > 0) {
-      const manifest = prompts.join("\n\n---\n\n");
-      const manifestUri =
-        "data:text/plain;charset=utf-8," + encodeURIComponent(manifest);
-      await startDownload(manifestUri, "GrokGallery/prompts.txt");
-    }
-
-    sendResponse({ success: true, count: items.length });
   } catch (err) {
     sendResponse({ success: false, error: err.message });
   }
@@ -147,7 +104,6 @@ async function handleGetStatus(sendResponse) {
     ? Object.keys(data.downloadedUrls).length
     : 0;
 
-  // Find active Grok tab
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   const activeTab = tabs[0];
   const isGrokPage =
