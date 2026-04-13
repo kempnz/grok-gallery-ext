@@ -12,9 +12,6 @@
   // Prevent double-injection
   if (window.__grokGalleryLoaded) return;
 
-  // Don't load on /imagine public feed, but allow /imagine/favorites
-  if (/^\/imagine(\/|$)/i.test(location.pathname) && !/^\/imagine\/favorites/i.test(location.pathname)) return;
-
   window.__grokGalleryLoaded = true;
 
   // Preserve console methods before Grok overrides them
@@ -36,7 +33,7 @@
 
   // ── State ──────────────────────────────────────────────────
   const state = {
-    items: [],            // [{id, url, thumbUrl, type, prompt, downloaded, element, apiId, resolution, isUpscaled}]
+    items: [],            // [{id, url, thumbUrl, type, prompt, downloaded, element, apiId, originalPostId, postIds, isUpscaled, width, height}]
     selected: new Set(),
     filter: "all",        // all | images | videos | new
     gridCols: 3,
@@ -48,6 +45,8 @@
     downloadedUrls: {},
     scanning: false,
     apiLoaded: false,     // true once we've fetched from API
+    pageMode: "all",      // "all" (root/favorites) or "post" (specific post)
+    currentPostId: null,  // post ID from URL when in post mode
   };
 
   // Minimum dimensions to filter out icons/avatars/emojis (DOM scan only)
@@ -73,10 +72,65 @@
     broom: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l2 7h-4l2-7z"/><path d="M10 9c-3 2-5 6-5 10a1 1 0 001 1h12a1 1 0 001-1c0-4-2-8-5-10"/><line x1="12" y1="13" x2="12" y2="17"/><line x1="9" y1="14" x2="9.5" y2="18"/><line x1="15" y1="14" x2="14.5" y2="18"/></svg>`,
   };
 
+  // ── Page Mode Detection ──────────────────────────────────
+  function detectPageMode() {
+    const path = location.pathname;
+    // /imagine/post/<uuid> → "post" mode
+    const postMatch = path.match(/^\/imagine\/post\/([^/]+)/i);
+    if (postMatch) {
+      state.pageMode = "post";
+      state.currentPostId = postMatch[1];
+    } else if (/^\/imagine\/?$/i.test(path) || /^\/imagine\/favorites/i.test(path)) {
+      // /imagine or /imagine/favorites → "all" mode
+      state.pageMode = "all";
+      state.currentPostId = null;
+    } else {
+      state.pageMode = "all";
+      state.currentPostId = null;
+    }
+    dbg(`Page mode: ${state.pageMode}, postId: ${state.currentPostId || "none"}`);
+  }
+
+  function setupUrlWatcher() {
+    // Poll location.href — content scripts run in an isolated world so
+    // patching history.pushState/replaceState doesn't intercept the page's calls.
+    let lastHref = location.href;
+    setInterval(() => {
+      if (location.href !== lastHref) {
+        lastHref = location.href;
+        onUrlChange();
+      }
+    }, 400);
+  }
+
+  function onUrlChange() {
+    const prevMode = state.pageMode;
+    const prevPostId = state.currentPostId;
+    detectPageMode();
+
+    if (prevMode !== state.pageMode || prevPostId !== state.currentPostId) {
+      dbg(`URL changed → mode: ${state.pageMode}, postId: ${state.currentPostId || "none"}`);
+      // Clear items and reset for new context
+      state.items = [];
+      state.apiLoaded = false;
+      state.selected.clear();
+      renderGallery();
+      updatePageModeUI();
+      updateStatusBar();
+
+      // Auto-fetch if sidecar is open
+      if (state.sidecarOpen) {
+        fetchAllMedia();
+      }
+    }
+  }
+
   // ── Initialization ─────────────────────────────────────────
   async function init() {
     await loadSettings();
+    detectPageMode();
     injectUI();
+    setupUrlWatcher();
     setupMutationObserver();
     setupMessageListener();
   }
@@ -127,34 +181,54 @@
   }
   async function _doFetchAllMedia() {
     updateScanButton();
-    flashMessage("Fetching from Grok API...");
-    dbg("Starting API fetch...");
-
     const existingUrls = new Set(state.items.map((i) => i.url));
     let totalNew = 0;
 
-    try {
-      // Fetch favorites only (assets API doesn't provide direct URLs)
-      const favResults = await fetchMediaPosts("MEDIA_POST_SOURCE_LIKED");
-      const newItems = favResults.filter((i) => !existingUrls.has(i.url));
-      newItems.forEach((i) => existingUrls.add(i.url));
-      state.items.push(...newItems);
-      totalNew += newItems.length;
-      dbg(`Favorites: ${favResults.length} total, ${newItems.length} new`);
+    if (state.pageMode === "post") {
+      // Post mode: fetch all favorites via API, then filter to this post's media
+      flashMessage("Fetching post media...");
+      dbg(`Post mode fetch for post: ${state.currentPostId}`);
 
-      state.apiLoaded = totalNew > 0 || state.apiLoaded;
+      try {
+        const postItems = await fetchSinglePost(state.currentPostId);
+        const newItems = postItems.filter((i) => !existingUrls.has(i.url));
+        newItems.forEach((i) => existingUrls.add(i.url));
+        state.items.push(...newItems);
+        totalNew += newItems.length;
+        dbg(`Post fetch: ${postItems.length} total, ${newItems.length} new`);
+      } catch (err) {
+        dbg(`Post fetch error: ${err.message}`);
+      }
 
-    } catch (err) {
-      dbg(`API fetch error: ${err.message}`);
-    }
-
-    // Only do DOM scan if API returned nothing (fallback)
-    if (!state.apiLoaded) {
-      const domNew = scanDOM(existingUrls);
-      totalNew += domNew;
-      dbg(`DOM scan (fallback): ${domNew} new items`);
+      state.apiLoaded = totalNew > 0;
     } else {
-      dbg("Skipping DOM scan — API data loaded");
+      // All mode: API fetch all favorites, DOM scan fallback
+      flashMessage("Fetching from Grok API...");
+      dbg("Starting API fetch...");
+
+      try {
+        // Fetch favorites only (assets API doesn't provide direct URLs)
+        const favResults = await fetchMediaPosts("MEDIA_POST_SOURCE_LIKED");
+        const newItems = favResults.filter((i) => !existingUrls.has(i.url));
+        newItems.forEach((i) => existingUrls.add(i.url));
+        state.items.push(...newItems);
+        totalNew += newItems.length;
+        dbg(`Favorites: ${favResults.length} total, ${newItems.length} new`);
+
+        state.apiLoaded = totalNew > 0 || state.apiLoaded;
+
+      } catch (err) {
+        dbg(`API fetch error: ${err.message}`);
+      }
+
+      // Only do DOM scan if API returned nothing (fallback)
+      if (!state.apiLoaded) {
+        const domNew = scanDOM(existingUrls);
+        totalNew += domNew;
+        dbg(`DOM scan (fallback): ${domNew} new items`);
+      } else {
+        dbg("Skipping DOM scan — API data loaded");
+      }
     }
 
     if (totalNew > 0) {
@@ -247,6 +321,38 @@
     return allItems;
   }
 
+  /**
+   * Fetch a single post by ID.
+   * Tries GET /rest/media/post/{id} first, then falls back to
+   * the list endpoint filtered to find this post.
+   */
+  async function fetchSinglePost(postId) {
+    resetPostLogCount();
+    dbg(`fetchSinglePost: looking for post ${postId}`);
+
+    // Fetch favourites and find the matching post, then return it
+    const allItems = await fetchMediaPosts("MEDIA_POST_SOURCE_LIKED");
+    dbg(`Fetched ${allItems.length} total favorites`);
+
+    for (let i = 0; i < allItems.length; i++) {
+      dbg(`  FAV[${i}]: apiId=${allItems[i].apiId}, originalPostId=${allItems[i].originalPostId || "NONE"}, prompt="${(allItems[i].prompt || "").slice(0, 40)}"`);
+    }
+
+    const group = allItems.filter((i) =>
+      i.apiId === postId ||
+      i.originalPostId === postId ||
+      (i.postIds && i.postIds.includes(postId))
+    );
+
+    if (group.length > 0) {
+      dbg(`Favourites filter: ${group.length} items for ${postId}`);
+      return group;
+    }
+
+    dbg(`No match for ${postId} — returning all ${allItems.length} items`);
+    return allItems;
+  }
+
   /* ============================================================
      API RESPONSE PARSERS
 
@@ -304,14 +410,32 @@
     const results = [];
     const prompt = post.prompt || post.originalPrompt || "";
     const apiId = post.id || null;
+    // Collect all ID-like field values for flexible matching
+    const postIds = [];
+    for (const key of Object.keys(post)) {
+      if (/id/i.test(key) && typeof post[key] === "string") {
+        postIds.push(post[key]);
+      }
+    }
+
 
     // Log first 3 posts — capture ALL keys so we can discover resolution/upscale fields
     if (_postLogCount < 3) {
       dbg(`Post #${_postLogCount} ALL KEYS: ${Object.keys(post).join(", ")}`);
+      // Log all ID-like fields so we can match post URLs to API data
+      for (const key of Object.keys(post)) {
+        if (/id/i.test(key) && typeof post[key] !== "object") {
+          dbg(`Post #${_postLogCount} ${key}: ${post[key]}`);
+        }
+      }
       dbg(`Post #${_postLogCount} mediaUrl: ${post.mediaUrl || "NONE"}`);
       dbg(`Post #${_postLogCount} mediaType: ${post.mediaType || "?"} mimeType: ${post.mimeType || "?"}`);
       dbg(`Post #${_postLogCount} images: ${Array.isArray(post.images) ? JSON.stringify(post.images).slice(0, 500) : "NONE"}`);
       dbg(`Post #${_postLogCount} videos: ${Array.isArray(post.videos) ? JSON.stringify(post.videos).slice(0, 500) : "NONE"}`);
+      dbg(`Post #${_postLogCount} childPosts: ${Array.isArray(post.childPosts) ? post.childPosts.length + " items" : "NONE"}`);
+      if (Array.isArray(post.childPosts) && post.childPosts.length > 0) {
+        dbg(`Post #${_postLogCount} childPosts[0] keys: ${Object.keys(post.childPosts[0]).join(", ")}`);
+      }
       dbg(`Post #${_postLogCount} prompt: ${(prompt || "").slice(0, 80)}`);
       // Log any resolution-related fields
       for (const key of Object.keys(post)) {
@@ -325,11 +449,15 @@
       _postLogCount++;
     }
 
+    // Extract originalPostId for favourite grouping
+    const originalPostId = post.originalPostId || null;
+
     // Detect upscale from post-level flags
     const postUpscaled = !!(post.isUpscaled || post.upscaled || post.isHd || post.hd ||
       post.quality === "hd" || post.quality === "high");
-    const postWidth = post.width || post.imageWidth || 0;
-    const postHeight = post.height || post.imageHeight || 0;
+    // Resolution can be a nested object { width, height } or flat fields
+    const postWidth = (post.resolution && post.resolution.width) || post.width || post.imageWidth || 0;
+    const postHeight = (post.resolution && post.resolution.height) || post.height || post.imageHeight || 0;
 
     // Main mediaUrl
     if (post.mediaUrl) {
@@ -339,12 +467,14 @@
       results.push({
         id: generateId(),
         apiId,
+        originalPostId,
         url,
         thumbUrl: url,
         type: isVideo ? "video" : "image",
         prompt,
         downloaded: !!state.downloadedUrls[url],
         element: null,
+        postIds,
         isUpscaled: postUpscaled,
         width: postWidth,
         height: postHeight,
@@ -360,18 +490,21 @@
           if (!results.some((r) => r.url === url)) {
             const imgUpscaled = typeof img === "object" ? !!(img.isUpscaled || img.upscaled ||
               img.isHd || img.hd || img.quality === "hd" || img.quality === "high") : false;
+            const imgRes = (typeof img === "object" && img.resolution) ? img.resolution : null;
             results.push({
               id: generateId(),
               apiId: img.id || apiId,
+              originalPostId,
               url,
               thumbUrl: url,
               type: "image",
               prompt: (typeof img === "object" ? (img.prompt || img.originalPrompt) : null) || prompt,
               downloaded: !!state.downloadedUrls[url],
               element: null,
+              postIds,
               isUpscaled: imgUpscaled || postUpscaled,
-              width: (typeof img === "object" ? (img.width || img.imageWidth) : 0) || 0,
-              height: (typeof img === "object" ? (img.height || img.imageHeight) : 0) || 0,
+              width: (imgRes && imgRes.width) || (typeof img === "object" ? (img.width || img.imageWidth) : 0) || 0,
+              height: (imgRes && imgRes.height) || (typeof img === "object" ? (img.height || img.imageHeight) : 0) || 0,
             });
           }
         }
@@ -384,25 +517,39 @@
         const vidUrl = typeof vid === "string" ? vid : (vid.mediaUrl || null);
         if (vidUrl) {
           if (!results.some((r) => r.url === vidUrl)) {
+            const vidRes = (typeof vid === "object" && vid.resolution) ? vid.resolution : null;
             results.push({
               id: generateId(),
               apiId: vid.id || apiId,
+              originalPostId,
               url: vidUrl,
               thumbUrl: vidUrl,
               type: "video",
               prompt: (typeof vid === "object" ? (vid.prompt || vid.originalPrompt) : null) || prompt,
               downloaded: !!state.downloadedUrls[vidUrl],
               element: null,
+              postIds,
               isUpscaled: false,
-              width: 0,
-              height: 0,
+              width: (vidRes && vidRes.width) || 0,
+              height: (vidRes && vidRes.height) || 0,
             });
           }
         }
       }
     }
 
-    // Skip childPosts — those are other users' remixes, not our content
+    // Parse childPosts — these are edits/variations of the parent post
+    if (Array.isArray(post.childPosts) && post.childPosts.length > 0) {
+      for (const child of post.childPosts) {
+        if (typeof child !== "object" || !child) continue;
+        const childParsed = parseMediaPost(child);
+        for (const ci of childParsed) {
+          if (!results.some((r) => r.url === ci.url)) {
+            results.push(ci);
+          }
+        }
+      }
+    }
 
     return results;
   }
@@ -691,6 +838,17 @@
      TUNING POINT: Delete button detection needs live site tuning.
      ============================================================ */
 
+  // Serializes DOM-fallback delete flows. The confirm modal is global,
+  // so parallel workers must not drive it concurrently. API deletes bypass
+  // this lock entirely.
+  let _domDeleteLock = Promise.resolve();
+  function withDomDeleteLock(fn) {
+    const run = () => fn();
+    const next = _domDeleteLock.then(run, run);
+    _domDeleteLock = next.catch(() => {});
+    return next;
+  }
+
   async function deleteItem(item, { silent = false } = {}) {
     // Try API-based delete first (unlike the post)
     if (item.apiId) {
@@ -710,28 +868,12 @@
       return true;
     }
 
-    const el = item.element;
+    return withDomDeleteLock(async () => {
+      const el = item.element;
 
-    const deleteBtn = findDeleteButton(el);
-    if (deleteBtn) {
-      deleteBtn.click();
-      await sleep(500);
-      const confirmBtn = findConfirmButton();
-      if (confirmBtn) {
-        confirmBtn.click();
-        await sleep(300);
-      }
-      removeItemFromState(item.id, silent);
-      return true;
-    }
-
-    const menuBtn = findMenuButton(el);
-    if (menuBtn) {
-      menuBtn.click();
-      await sleep(400);
-      const deleteOption = findDeleteInMenu();
-      if (deleteOption) {
-        deleteOption.click();
+      const deleteBtn = findDeleteButton(el);
+      if (deleteBtn) {
+        deleteBtn.click();
         await sleep(500);
         const confirmBtn = findConfirmButton();
         if (confirmBtn) {
@@ -741,10 +883,28 @@
         removeItemFromState(item.id, silent);
         return true;
       }
-    }
 
-    dbg(`Delete failed for item ${item.apiId || item.id}: no API or DOM method worked`);
-    return false;
+      const menuBtn = findMenuButton(el);
+      if (menuBtn) {
+        menuBtn.click();
+        await sleep(400);
+        const deleteOption = findDeleteInMenu();
+        if (deleteOption) {
+          deleteOption.click();
+          await sleep(500);
+          const confirmBtn = findConfirmButton();
+          if (confirmBtn) {
+            confirmBtn.click();
+            await sleep(300);
+          }
+          removeItemFromState(item.id, silent);
+          return true;
+        }
+      }
+
+      dbg(`Delete failed for item ${item.apiId || item.id}: no API or DOM method worked`);
+      return false;
+    });
   }
 
   /**
@@ -1065,6 +1225,12 @@
         </div>
       </div>
 
+      <div class="gg-context-bar" id="gg-context-bar">
+        <span class="gg-context-icon">${state.pageMode === "post" ? "&#128444;" : "&#9733;"}</span>
+        <span class="gg-context-text" id="gg-context-text">${state.pageMode === "post" ? "Viewing post" : "All Favorites"}</span>
+        ${state.pageMode === "post" ? `<button class="gg-dl-post-btn" id="gg-dl-post-btn">${ICONS.download} Download Post</button>` : ""}
+      </div>
+
       <div class="gg-bulk-bar" id="gg-bulk-bar">
         <span class="gg-bulk-count" id="gg-bulk-count">0 selected</span>
         <div class="gg-bulk-actions">
@@ -1217,6 +1383,10 @@
     document.getElementById("gg-dl-all").addEventListener("click", () => downloadAllByType("all"));
     document.getElementById("gg-cancel-download").addEventListener("click", () => { _downloadCancelled = true; });
 
+    // Download Post button (only exists in post mode)
+    const dlPostBtn = document.getElementById("gg-dl-post-btn");
+    if (dlPostBtn) dlPostBtn.addEventListener("click", downloadCurrentPost);
+
     // Delete buttons
     document.getElementById("gg-del-downloaded").addEventListener("click", () => deleteAllByFilter("downloaded"));
     document.getElementById("gg-del-all").addEventListener("click", () => deleteAllByFilter("all"));
@@ -1329,6 +1499,29 @@
      GALLERY RENDERING
      ============================================================ */
 
+  // Targeted DOM update for a single item's downloaded state —
+  // avoids a full renderGallery() (which nukes innerHTML, re-creates
+  // Image() probes per card, and resets pagination).
+  function markCardDownloaded(item) {
+    const gallery = document.getElementById("gg-gallery");
+    if (!gallery) return;
+    const card = gallery.querySelector(`.gg-card[data-id="${item.id}"]`);
+    if (!card) return;
+
+    // If the "new" filter is active, the item no longer matches — remove it.
+    if (state.filter === "new") {
+      card.remove();
+      return;
+    }
+
+    if (state.showBadges && !card.querySelector(".gg-downloaded-badge")) {
+      const badge = document.createElement("div");
+      badge.className = "gg-downloaded-badge";
+      badge.textContent = "\u2713";
+      card.appendChild(badge);
+    }
+  }
+
   function getFilteredItems() {
     return state.items.filter((item) => {
       if (state.filter === "images" && item.type !== "image") return false;
@@ -1406,11 +1599,14 @@
     gallery.querySelectorAll(".gg-card:not([data-bound])").forEach((card) => {
       card.setAttribute("data-bound", "1");
       const id = card.dataset.id;
-      const idx = parseInt(card.dataset.index);
 
       card.addEventListener("click", (e) => {
         if (e.target.closest(".gg-card-action") || e.target.closest(".gg-card-check")) return;
-        openLightbox(idx);
+        // Resolve index live so it stays correct if surrounding cards
+        // are removed (e.g. when filter="new" and items get marked downloaded).
+        const filtered = getFilteredItems();
+        const liveIdx = filtered.findIndex((i) => i.id === id);
+        if (liveIdx >= 0) openLightbox(liveIdx);
       });
 
       card.querySelector(".gg-card-check")?.addEventListener("click", (e) => {
@@ -1612,26 +1808,60 @@
     deselectAll();
   }
 
+  // Concurrency for bulk deletes. Kept modest because the DOM-fallback
+  // path shares a single confirm modal — too much parallelism would race it.
+  // Items with apiId go straight through the API and are fully parallel-safe.
+  const DELETE_CONCURRENCY = 3;
+
+  async function deleteItemsParallel(items, { onProgress } = {}) {
+    const total = items.length;
+    let deleted = 0;
+    let failed = 0;
+    let cursor = 0;
+
+    async function worker() {
+      while (!_downloadCancelled) {
+        const idx = cursor++;
+        if (idx >= total) return;
+        const item = items[idx];
+
+        let success = await deleteItem(item, { silent: true });
+        if (!success) {
+          await sleep(500);
+          success = await deleteItem(item, { silent: true });
+        }
+
+        if (success) {
+          deleted++;
+          removeCardFromGallery(item.id);
+        } else {
+          failed++;
+        }
+        onProgress?.({ deleted, failed, done: deleted + failed, total });
+      }
+    }
+
+    const pool = Math.min(DELETE_CONCURRENCY, total);
+    await Promise.all(Array.from({ length: pool }, () => worker()));
+    return { deleted, failed };
+  }
+
+  function removeCardFromGallery(id) {
+    const gallery = document.getElementById("gg-gallery");
+    if (!gallery) return;
+    gallery.querySelector(`.gg-card[data-id="${id}"]`)?.remove();
+  }
+
   async function bulkDelete() {
     const selectedItems = state.items.filter((i) => state.selected.has(i.id));
     if (selectedItems.length === 0) return;
-    let deleted = 0;
-    let failed = 0;
-    for (const item of selectedItems) {
-      let success = await deleteItem(item, { silent: true });
-      if (!success) {
-        await sleep(500);
-        success = await deleteItem(item, { silent: true });
-      }
-      if (success) deleted++;
-      else failed++;
-      await sleep(50);
-    }
+    _downloadCancelled = false;
+    const { deleted, failed } = await deleteItemsParallel(selectedItems);
     state.selected.clear();
     flashMessage(failed > 0
       ? `Deleted ${deleted}, failed ${failed}. Check debug log.`
       : `Deleted ${deleted} items`);
-    renderGallery();
+    updateBulkBar();
     updateStatusBar();
   }
 
@@ -1710,27 +1940,14 @@
     const progressFill = document.getElementById("gg-progress-fill");
     if (progressBar) progressBar.style.display = "flex";
 
-    let deleted = 0;
-    let failed = 0;
     const total = items.length;
-
-    for (let i = 0; i < items.length; i++) {
-      if (_downloadCancelled) break;
-      const pct = Math.round(((i + 1) / total) * 100);
-      if (progressText) progressText.textContent = `Deleting ${i + 1}/${total} (${deleted} ok, ${failed} failed)...`;
-      if (progressFill) progressFill.style.width = `${pct}%`;
-
-      let success = await deleteItem(items[i], { silent: true });
-      // One retry if it failed
-      if (!success) {
-        await sleep(500);
-        success = await deleteItem(items[i], { silent: true });
-      }
-      if (success) deleted++;
-      else failed++;
-
-      await sleep(50);
-    }
+    const { deleted, failed } = await deleteItemsParallel(items, {
+      onProgress: ({ deleted, failed, done }) => {
+        const pct = Math.round((done / total) * 100);
+        if (progressText) progressText.textContent = `Deleting ${done}/${total} (${deleted} ok, ${failed} failed)...`;
+        if (progressFill) progressFill.style.width = `${pct}%`;
+      },
+    });
 
     _operationInProgress = false;
     if (progressBar) progressBar.style.display = "none";
@@ -1740,7 +1957,6 @@
         ? `Deleted ${deleted}, failed ${failed} of ${total}. Check debug log.`
         : `Deleted ${deleted} items`;
     flashMessage(msg);
-    renderGallery();
     updateStatusBar();
   }
 
@@ -1782,7 +1998,8 @@
       if (response?.success) {
         item.downloaded = true;
         state.downloadedUrls[item.url] = Date.now();
-        renderGallery();
+        markCardDownloaded(item);
+        updateStatusBar();
         flashMessage("Downloaded!");
       } else {
         flashMessage(`Download error: ${response?.error || "No response"}`);
@@ -1797,6 +2014,10 @@
    * Yields to the event loop between each to keep the UI responsive.
    * Uses a shared batch folder for all items.
    */
+  // Concurrency for bulk downloads. Low enough to avoid overwhelming
+  // Chrome's download manager / Grok's CDN, high enough to hide latency.
+  const DOWNLOAD_CONCURRENCY = 3;
+
   async function downloadItemsStaggered(items) {
     if (items.length === 0) return;
     _downloadCancelled = false;
@@ -1808,53 +2029,61 @@
     const progressFill = document.getElementById("gg-progress-fill");
     if (progressBar) progressBar.style.display = "flex";
 
+    const total = items.length;
     let completed = 0;
     let failed = 0;
+    let cursor = 0;
 
-    for (const item of items) {
-      if (_downloadCancelled) break;
-
-      completed++;
-      const pct = Math.round((completed / items.length) * 100);
-      if (progressText) progressText.textContent = `Downloading ${completed}/${items.length}...`;
+    const updateProgress = () => {
+      const pct = Math.round((completed / total) * 100);
+      if (progressText) progressText.textContent = `Downloading ${completed}/${total}...`;
       if (progressFill) progressFill.style.width = `${pct}%`;
+    };
 
-      try {
-        const filename = generateFilename(item, completed);
-        const response = await chrome.runtime.sendMessage({
-          type: "DOWNLOAD_SINGLE",
-          url: item.url,
-          filename,
-          folder,
-          mediaType: item.type,
-          prompt: item.prompt,
-        });
-        if (response?.success) {
-          item.downloaded = true;
-          state.downloadedUrls[item.url] = Date.now();
-        } else {
+    async function worker() {
+      while (!_downloadCancelled) {
+        const idx = cursor++;
+        if (idx >= total) return;
+        const item = items[idx];
+        try {
+          const filename = generateFilename(item, idx + 1);
+          const response = await chrome.runtime.sendMessage({
+            type: "DOWNLOAD_SINGLE",
+            url: item.url,
+            filename,
+            folder,
+            mediaType: item.type,
+            prompt: item.prompt,
+          });
+          if (response?.success) {
+            item.downloaded = true;
+            state.downloadedUrls[item.url] = Date.now();
+            markCardDownloaded(item);
+          } else {
+            failed++;
+          }
+        } catch {
           failed++;
         }
-      } catch {
-        failed++;
+        completed++;
+        updateProgress();
       }
-
-      // Yield to event loop every item to keep UI responsive
-      await sleep(50);
     }
+
+    const pool = Math.min(DOWNLOAD_CONCURRENCY, total);
+    await Promise.all(Array.from({ length: pool }, () => worker()));
 
     _operationInProgress = false;
 
     if (progressBar) progressBar.style.display = "none";
 
     const msg = _downloadCancelled
-      ? `Cancelled. Downloaded ${completed - 1} of ${items.length}`
+      ? `Cancelled. Downloaded ${completed} of ${total}`
       : failed > 0
         ? `Done. ${completed - failed} downloaded, ${failed} failed`
         : `Downloaded ${completed} items`;
     flashMessage(msg);
     updateStatusBar();
-    renderGallery();
   }
 
   async function downloadAllByType(type) {
@@ -1882,6 +2111,42 @@
     }
     flashMessage(`Starting download of ${toDownload.length} items...`);
     await downloadItemsStaggered(toDownload);
+  }
+
+  async function downloadCurrentPost() {
+    if (_operationInProgress) {
+      flashMessage("Another operation is in progress");
+      return;
+    }
+    const toDownload = state.items.filter((i) => !i.downloaded);
+    if (toDownload.length === 0) {
+      flashMessage("All items already downloaded");
+      return;
+    }
+    flashMessage(`Downloading ${toDownload.length} post item${toDownload.length > 1 ? "s" : ""}...`);
+    await downloadItemsStaggered(toDownload);
+  }
+
+  function updatePageModeUI() {
+    const contextBar = document.getElementById("gg-context-bar");
+    if (!contextBar) return;
+
+    const isPost = state.pageMode === "post";
+    const icon = isPost ? "&#128444;" : "&#9733;";
+    const text = isPost ? "Viewing post" : "All Favorites";
+    const dlBtn = isPost
+      ? `<button class="gg-dl-post-btn" id="gg-dl-post-btn">${ICONS.download} Download Post</button>`
+      : "";
+
+    contextBar.innerHTML = `
+      <span class="gg-context-icon">${icon}</span>
+      <span class="gg-context-text" id="gg-context-text">${text}</span>
+      ${dlBtn}
+    `;
+
+    // Re-bind Download Post button
+    const dlPostBtn = document.getElementById("gg-dl-post-btn");
+    if (dlPostBtn) dlPostBtn.addEventListener("click", downloadCurrentPost);
   }
 
   function generateFilename(item, index) {

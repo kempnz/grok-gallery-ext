@@ -189,6 +189,53 @@
   border-color: #00d4ff44;
 }
 
+/* ── Context Bar (page mode indicator) ────────────────────── */
+.gg-context-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 14px;
+  border-bottom: 1px solid #1a1a28;
+  background: #111120;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: #888;
+}
+.gg-context-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+.gg-context-text {
+  flex: 1;
+  font-weight: 600;
+  color: #aaa;
+}
+.gg-dl-post-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: linear-gradient(135deg, #00d4ff22, #7b2ff722);
+  border: 1px solid #00d4ff44;
+  color: #00d4ff;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: inherit;
+  white-space: nowrap;
+}
+.gg-dl-post-btn:hover {
+  background: linear-gradient(135deg, #00d4ff33, #7b2ff733);
+  border-color: #00d4ff88;
+  color: #fff;
+}
+.gg-dl-post-btn svg {
+  width: 12px;
+  height: 12px;
+}
+
 /* ── Bulk Actions Bar ──────────────────────────────────────── */
 .gg-bulk-bar {
   display: none;

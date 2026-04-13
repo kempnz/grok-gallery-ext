@@ -61,10 +61,8 @@ async function handleDownloadSingle(msg, sendResponse) {
 
 // ── Get status for popup ───────────────────────────────────────
 async function handleGetStatus(sendResponse) {
-  const data = await chrome.storage.local.get(["downloadedUrls"]);
-  const downloadCount = data.downloadedUrls
-    ? Object.keys(data.downloadedUrls).length
-    : 0;
+  const downloaded = await loadDownloadedCache();
+  const downloadCount = Object.keys(downloaded).length;
 
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   const activeTab = tabs?.[0];
@@ -181,18 +179,49 @@ function eraseWhenComplete(downloadId) {
   chrome.downloads.onChanged.addListener(onChanged);
 }
 
+// In-memory cache of downloadedUrls. Loaded lazily, written back
+// via a debounced flush so rapid bulk downloads don't serialize the
+// entire object through chrome.storage on every item.
+let _downloadedCache = null;
+let _loadPromise = null;
+let _flushTimer = null;
+const FLUSH_DELAY_MS = 250;
+const MAX_DOWNLOADED = 5000;
+
+async function loadDownloadedCache() {
+  if (_downloadedCache) return _downloadedCache;
+  // Share a single in-flight storage.get across concurrent callers so
+  // parallel markDownloaded() calls don't each reassign the cache and
+  // stomp each other's pending mutations.
+  if (!_loadPromise) {
+    _loadPromise = chrome.storage.local.get(["downloadedUrls"]).then((data) => {
+      _downloadedCache = data.downloadedUrls || {};
+      return _downloadedCache;
+    });
+  }
+  return _loadPromise;
+}
+
+function scheduleFlush() {
+  if (_flushTimer) return;
+  _flushTimer = setTimeout(async () => {
+    _flushTimer = null;
+    if (!_downloadedCache) return;
+    await chrome.storage.local.set({ downloadedUrls: _downloadedCache });
+  }, FLUSH_DELAY_MS);
+}
+
 async function markDownloaded(url) {
-  const data = await chrome.storage.local.get(["downloadedUrls"]);
-  const downloaded = data.downloadedUrls || {};
+  const downloaded = await loadDownloadedCache();
   downloaded[url] = Date.now();
 
-  // Prune oldest entries if exceeding 5000 to prevent storage bloat
+  // Prune oldest entries if exceeding cap to prevent storage bloat.
   const keys = Object.keys(downloaded);
-  if (keys.length > 5000) {
+  if (keys.length > MAX_DOWNLOADED) {
     const sorted = keys.sort((a, b) => downloaded[a] - downloaded[b]);
-    const toRemove = sorted.slice(0, keys.length - 5000);
+    const toRemove = sorted.slice(0, keys.length - MAX_DOWNLOADED);
     for (const k of toRemove) delete downloaded[k];
   }
 
-  await chrome.storage.local.set({ downloadedUrls: downloaded });
+  scheduleFlush();
 }
